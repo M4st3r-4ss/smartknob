@@ -156,7 +156,9 @@ void drawMenu(TFT_eSprite& spr, const UiState& ui_state, uint32_t now_ms, float 
         icon(spr, APPS[MENU_ITEMS[i]].icon, (int16_t)x, (int16_t)y, size, color, 0.68f, now_ms * 0.04f);
     }
 
-    // Label pair for the nearest app, fading out while the row is mid-slide.
+    // Name of the nearest app, fading out while the row is mid-slide. No caption
+    // under it: the menu reads cleaner as icon plus name. app.caption still does
+    // its job on the app page itself.
     if (nearest >= 0 && nearest < (int8_t)MENU_ITEM_COUNT) {
         const AppDescriptor& app = APPS[MENU_ITEMS[nearest]];
         float settle = clamp01(1 - fabsf(anim.carousel - nearest) * 2.4f) * enter;
@@ -164,11 +166,9 @@ void drawMenu(TFT_eSprite& spr, const UiState& ui_state, uint32_t now_ms, float 
             char name[24];
             upperCopy(name, sizeof(name), app.name);
             // Measured from the icon, not the screen: the gap under the glyph is
-            // what the eye reads, and the caption still clears the selection dots.
+            // what the eye reads.
             trackedText(spr, name, CENTER_X, (int16_t)(icon_y + 56), &FreeSansBold9pt7b,
                         mix(COLOR_BG, COLOR_TEXT, settle), 3);
-            centeredText(spr, app.caption, CENTER_X, (int16_t)(icon_y + 76), &FreeSans9pt7b,
-                         mix(COLOR_BG, COLOR_TEXT_DIM, settle));
         }
     }
 
