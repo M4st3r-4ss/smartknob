@@ -57,6 +57,13 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
         /** How long the knob must be held on an app page to return to the menu. */
         static const uint32_t HOLD_TO_EXIT_MS = 600;
 
+        /**
+         * Click played when a new app comes up in the menu. Amplitude is capped by
+         * the motor's voltage limit, so the weight of it comes from the duration.
+         */
+        static constexpr float MENU_STEP_HAPTIC_STRENGTH = 1;
+        static constexpr uint8_t MENU_STEP_HAPTIC_MS = 3;
+
         UiState ui_state_ = {};
         uint8_t menu_selection_ = 0;
         /** Last value of each app, so reopening one resumes where it was left. */
@@ -65,6 +72,8 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
         int32_t muted_position_ = 0;
         /** Nonce for locally-applied configs, so the motor honours our position. */
         uint8_t local_nonce_ = 1;
+        /** Nonce of the menu config, to tell our own state from the app we just left. */
+        uint8_t menu_nonce_ = 0;
 
         bool knob_pressed_ = false;
         uint32_t press_started_ms_ = 0;
