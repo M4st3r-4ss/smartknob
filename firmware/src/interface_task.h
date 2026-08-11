@@ -132,6 +132,13 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
         /** Timer app: arm, pause/resume, and count down. */
         void toggleTimer();
         void tickTimer();
+        /**
+         * True while a countdown is running or waiting to be acknowledged. The
+         * dial is ignored in those states so a knock cannot wipe out a timer.
+         */
+        bool timerActive() const;
+        /** Drops any countdown, running, paused or finished. */
+        void clearTimer();
         /** Non-blocking haptic alert pulses, used when a countdown ends. */
         void tickAlert();
         uint8_t alert_pulses_left_ = 0;

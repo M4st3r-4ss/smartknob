@@ -131,22 +131,29 @@ void InterfaceTask::run() {
         if (xQueueReceive(knob_state_queue_, &latest_state_, 0) == pdTRUE) {
             publishState();
 
-            if (ui_state_.mode == UiMode::MENU) {
+            // States already in flight when a config is applied still carry the
+            // old position. Acting on those would undo the move we just asked
+            // for, so wait until the motor echoes the config we last sent.
+            bool position_is_current = !latest_state_.has_config
+                    || latest_state_.config.position_nonce == latest_config_.position_nonce;
+
+            if (!position_is_current) {
+                // Nothing to do until the motor catches up.
+            } else if (ui_state_.mode == UiMode::MENU) {
                 menu_selection_ = (uint8_t)CLAMP(latest_state_.current_position, (int32_t)0, (int32_t)(MENU_ITEM_COUNT - 1));
                 ui_state_.app_index = MENU_ITEMS[menu_selection_];
                 publishUiState();
             } else if (ui_state_.mode == UiMode::APP) {
+                // A live countdown ignores the dial, so brushing the knob can
+                // no longer wipe it out; the dial is re-seated when it stops.
+                bool dial_locked = currentApp().kind == AppKind::TIMER && timerActive();
                 int32_t previous = app_position_[ui_state_.app_index];
-                app_position_[ui_state_.app_index] = latest_state_.current_position;
-                if (latest_state_.current_position != previous) {
-                    // Turning the knob cancels a countdown rather than fighting it.
+                if (!dial_locked && latest_state_.current_position != previous) {
+                    app_position_[ui_state_.app_index] = latest_state_.current_position;
+                    // Only a paused countdown can still be holding a remainder
+                    // here, and dialling a new duration replaces it.
                     if (currentApp().kind == AppKind::TIMER) {
-                        timer_deadline_ms_ = 0;
-                        timer_paused_s_ = 0;
-                        ui_state_.timer_running = false;
-                        ui_state_.timer_remaining_s = 0;
-                        ui_state_.timer_total_s = 0;
-                        ui_state_.timer_elapsed = false;
+                        clearTimer();
                     }
                     noteHostValue();
                     publishUiState();
@@ -485,12 +492,27 @@ void InterfaceTask::updateStrainCalibration() {
     #endif
 }
 
+bool InterfaceTask::timerActive() const {
+    return timer_deadline_ms_ != 0 || ui_state_.timer_elapsed;
+}
+
+void InterfaceTask::clearTimer() {
+    timer_deadline_ms_ = 0;
+    timer_paused_s_ = 0;
+    timer_last_shown_s_ = 0;
+    ui_state_.timer_running = false;
+    ui_state_.timer_remaining_s = 0;
+    ui_state_.timer_total_s = 0;
+    ui_state_.timer_elapsed = false;
+}
+
 void InterfaceTask::toggleTimer() {
     if (ui_state_.timer_elapsed) {
         // Acknowledge a finished countdown instead of immediately re-arming.
-        ui_state_.timer_elapsed = false;
-        ui_state_.timer_remaining_s = 0;
-        ui_state_.timer_total_s = 0;
+        clearTimer();
+        // The dial was locked while it ran, so the knob may be nowhere near the
+        // duration still shown. Put the motor back on it before rotation counts.
+        reapplyCurrentConfig();
         return;
     }
 
@@ -501,6 +523,8 @@ void InterfaceTask::toggleTimer() {
         timer_deadline_ms_ = 0;
         ui_state_.timer_running = false;
         ui_state_.timer_remaining_s = timer_paused_s_;
+        // Pausing unlocks the dial, so re-seat it for the same reason.
+        reapplyCurrentConfig();
         return;
     }
 

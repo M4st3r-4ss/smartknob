@@ -19,7 +19,10 @@ const AppDescriptor APPS[] = {
         "Fine level",
         AppIcon::VOLUME,
         ValueStyle::PERCENT,
-        PressAction::MUTE,
+        // No press action: the knob is easy to nudge, and a mute-to-zero that
+        // fires by accident is worse than not having one. PressAction::MUTE
+        // still works if it is ever wanted back here.
+        PressAction::NONE,
         nullptr,
         0,
         AppKind::VALUE,
