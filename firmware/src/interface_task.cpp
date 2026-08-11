@@ -144,16 +144,7 @@ void InterfaceTask::run() {
             publishState();
 
             if (ui_state_.mode == UiMode::MENU) {
-                // Until the motor echoes the menu nonce back, this state still
-                // describes the app we left, so it must not move the selection or
-                // fire a click.
-                if (latest_state_.config.position_nonce == menu_nonce_) {
-                    uint8_t selection = (uint8_t)CLAMP(latest_state_.current_position, (int32_t)0, (int32_t)(APP_COUNT - 1));
-                    if (selection != menu_selection_) {
-                        menu_selection_ = selection;
-                        motor_task_.playHaptic(true, MENU_STEP_HAPTIC_STRENGTH, MENU_STEP_HAPTIC_MS);
-                    }
-                }
+                menu_selection_ = (uint8_t)CLAMP(latest_state_.current_position, (int32_t)0, (int32_t)(APP_COUNT - 1));
             } else if (ui_state_.mode == UiMode::APP) {
                 app_position_[ui_state_.app_index] = latest_state_.current_position;
             }
@@ -196,8 +187,7 @@ void InterfaceTask::openMenu() {
     publishUiState();
 
     PB_SmartKnobConfig config = menuConfig(menu_selection_);
-    menu_nonce_ = local_nonce_++;
-    config.position_nonce = menu_nonce_;
+    config.position_nonce = local_nonce_++;
     applyConfig(config, false);
 }
 

@@ -18,13 +18,7 @@ enum class CommandType {
 
 struct HapticData {
     bool press;
-    /**
-     * Torque of the click. Clamped by the motor's voltage limit, so raising this
-     * past FOC_VOLTAGE_LIMIT has no effect. 0 uses the press/release default.
-     */
-    float strength;
-    /** How long each half of the click is driven, in ms. 0 uses the default. */
-    uint8_t duration_ms;
+
 };
 
 struct Command {
@@ -45,8 +39,7 @@ class MotorTask : public Task<MotorTask> {
         ~MotorTask();
 
         void setConfig(const PB_SmartKnobConfig& config);
-        /** Plays a click. Pass strength/duration_ms to override the defaults. */
-        void playHaptic(bool press, float strength = 0, uint8_t duration_ms = 0);
+        void playHaptic(bool press);
         void runCalibration();
 
         void addListener(QueueHandle_t queue);
