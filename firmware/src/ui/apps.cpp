@@ -124,8 +124,8 @@ const uint8_t APP_COUNT = sizeof(APPS) / sizeof(APPS[0]);
 PB_SmartKnobConfig menuConfig(uint8_t selected) {
     PB_SmartKnobConfig config = {
         selected, 0, 0,
-        0, APP_COUNT - 1, 12 * PI / 180,
-        1.4, 1, 1.1,
+        0, APP_COUNT - 1, 43 * PI / 180,
+        1.3, 1, 1.1,
         "Menu",
         0, {}, 0,
         32,
