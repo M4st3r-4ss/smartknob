@@ -124,8 +124,10 @@ const uint8_t APP_COUNT = sizeof(APPS) / sizeof(APPS[0]);
 PB_SmartKnobConfig menuConfig(uint8_t selected) {
     PB_SmartKnobConfig config = {
         selected, 0, 0,
-        0, APP_COUNT - 1, 12 * PI / 180,
-        1.4, 1, 1.1,
+        // Wide, heavy detents: the menu should feel like a machined selector
+        // rather than a free-spinning dial, so each app takes a deliberate turn.
+        0, APP_COUNT - 1, 36 * PI / 180,
+        7, 1, 1.1,
         "Menu",
         0, {}, 0,
         32,
