@@ -135,6 +135,74 @@ static void iconTimer(TFT_eSprite& spr, int16_t cx, int16_t cy, float s, uint16_
     spr.fillCircle(cx, cy, 0.10f * s, color);
 }
 
+static void iconSettings(TFT_eSprite& spr, int16_t cx, int16_t cy, float s, uint16_t color, float anim_deg) {
+    for (uint8_t i = 0; i < 6; i++) {
+        float rad = (anim_deg + i * 60) * PI / 180;
+        float cos_a = cosf(rad);
+        float sin_a = sinf(rad);
+        stroke(spr, cx + 0.46f * s * cos_a, cy - 0.46f * s * sin_a,
+            cx + 0.86f * s * cos_a, cy - 0.86f * s * sin_a, color);
+        spr.fillCircle(cx + 0.80f * s * cos_a, cy - 0.80f * s * sin_a, 0.11f * s, color);
+    }
+    strokeArc(spr, cx, cy, 0.50f * s, 2, 0, 360, color);
+    spr.drawCircle(cx, cy, 0.22f * s, dim(color, 0.6f));
+}
+
+static void iconStrength(TFT_eSprite& spr, int16_t cx, int16_t cy, float s, uint16_t color, float value_unit) {
+    // Rising bars, filled up to the current level.
+    uint8_t lit = 1 + (uint8_t)(value_unit * 3.99f);
+    for (uint8_t i = 0; i < 4; i++) {
+        float h = (0.28f + 0.30f * i) * s;
+        float x = cx + (i - 1.5f) * 0.36f * s;
+        uint16_t bar = i < lit ? color : dim(color, 0.25f);
+        spr.fillRect(x - 0.12f * s, cy + 0.62f * s - h, 0.24f * s, h, bar);
+    }
+}
+
+static void iconPress(TFT_eSprite& spr, int16_t cx, int16_t cy, float s, uint16_t color, float value_unit) {
+    float plate_y = cy + 0.52f * s;
+    spr.fillRect(cx - 0.72f * s, plate_y, 1.44f * s, 0.14f * s, color);
+    float tip = plate_y - (0.16f + 0.30f * (1 - value_unit)) * s;
+    stroke(spr, cx, cy - 0.66f * s, cx, tip, color);
+    spr.fillTriangle(cx, tip + 0.04f * s,
+        cx - 0.22f * s, tip - 0.26f * s,
+        cx + 0.22f * s, tip - 0.26f * s, color);
+    strokeArc(spr, cx, plate_y, 0.30f * s + 0.34f * s * value_unit, 1, 200, 340, dim(color, 0.5f));
+}
+
+static void iconClick(TFT_eSprite& spr, int16_t cx, int16_t cy, float s, uint16_t color, float value_unit) {
+    spr.fillCircle(cx, cy, 0.20f * s, color);
+    for (uint8_t i = 0; i < 3; i++) {
+        float r = (0.40f + 0.22f * i) * s;
+        uint16_t ring = dim(color, 0.9f - 0.22f * i * (1.2f - value_unit));
+        strokeArc(spr, cx, cy, r, 2, -52 - 14 * i, 52 + 14 * i, ring);
+        strokeArc(spr, cx, cy, r, 2, 128 - 14 * i, 232 + 14 * i, ring);
+    }
+}
+
+static void iconLed(TFT_eSprite& spr, int16_t cx, int16_t cy, float s, uint16_t color, float value_unit) {
+    strokeArc(spr, cx, cy, 0.72f * s, 1, 0, 360, dim(color, 0.35f));
+    uint8_t lit = (uint8_t)(value_unit * 8.0f + 0.5f);
+    for (uint8_t i = 0; i < 8; i++) {
+        float rad = (90 - i * 45) * PI / 180;
+        uint16_t led = i < lit ? color : dim(color, 0.28f);
+        spr.fillCircle(cx + 0.72f * s * cosf(rad), cy - 0.72f * s * sinf(rad), 0.15f * s, led);
+    }
+    spr.fillCircle(cx, cy, 0.16f * s, dim(color, 0.45f + 0.45f * value_unit));
+}
+
+static void iconCalibrate(TFT_eSprite& spr, int16_t cx, int16_t cy, float s, uint16_t color, float anim_deg) {
+    strokeArc(spr, cx, cy, 0.74f * s, 2, 0, 360, dim(color, 0.55f));
+    for (uint8_t i = 0; i < 4; i++) {
+        float rad = i * 90 * PI / 180;
+        stroke(spr, cx + 0.46f * s * cosf(rad), cy - 0.46f * s * sinf(rad),
+            cx + 0.92f * s * cosf(rad), cy - 0.92f * s * sinf(rad), color);
+    }
+    float rad = anim_deg * PI / 180;
+    stroke(spr, cx, cy, cx + 0.48f * s * cosf(rad), cy - 0.48f * s * sinf(rad), color);
+    spr.fillCircle(cx, cy, 0.11f * s, color);
+}
+
 void icon(TFT_eSprite& spr, AppIcon which, int16_t cx, int16_t cy, float size, uint16_t color, float value_unit, float anim_deg) {
     if (size < 3) {
         return;
@@ -158,6 +226,24 @@ void icon(TFT_eSprite& spr, AppIcon which, int16_t cx, int16_t cy, float size, u
             break;
         case AppIcon::TIMER:
             iconTimer(spr, cx, cy, size, color, value_unit);
+            break;
+        case AppIcon::SETTINGS:
+            iconSettings(spr, cx, cy, size, color, anim_deg);
+            break;
+        case AppIcon::STRENGTH:
+            iconStrength(spr, cx, cy, size, color, value_unit);
+            break;
+        case AppIcon::PRESS:
+            iconPress(spr, cx, cy, size, color, value_unit);
+            break;
+        case AppIcon::CLICK:
+            iconClick(spr, cx, cy, size, color, value_unit);
+            break;
+        case AppIcon::LED:
+            iconLed(spr, cx, cy, size, color, value_unit);
+            break;
+        case AppIcon::CALIBRATE:
+            iconCalibrate(spr, cx, cy, size, color, anim_deg);
             break;
     }
 }

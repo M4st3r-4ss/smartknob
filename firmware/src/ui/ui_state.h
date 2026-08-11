@@ -9,6 +9,10 @@ enum class UiMode : uint8_t {
     APP,
     /** A config arrived over serial, so a host is driving the knob. */
     REMOTE,
+    /** Vertical settings list; rotate to scroll, press to edit a row. */
+    SETTINGS,
+    /** One settings row is being adjusted; press or hold to leave. */
+    SETTING_EDIT,
 };
 
 struct UiState {
@@ -21,4 +25,20 @@ struct UiState {
     uint8_t mode_nonce = 0;
     /** Bumped on every short press so the renderer can play a tap ripple. */
     uint8_t press_nonce = 0;
+
+    /** Highlighted row while mode is SETTINGS or SETTING_EDIT. */
+    uint8_t setting_index = 0;
+    /** Value of each settings row, so the list can show all of them at once. */
+    int16_t setting_values[8] = {};
+
+    /** Seconds left on the timer app, or 0 when it is not counting down. */
+    uint32_t timer_remaining_s = 0;
+    /** Duration the running countdown started from, for the progress arc. */
+    uint32_t timer_total_s = 0;
+    bool timer_running = false;
+    /** Set when a countdown reaches zero, cleared once acknowledged. */
+    bool timer_elapsed = false;
+
+    /** Strain calibration phase, 0 when not calibrating (see InterfaceTask). */
+    uint8_t calibration_step = 0;
 };

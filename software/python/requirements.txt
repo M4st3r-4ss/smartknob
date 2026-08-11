@@ -1,19 +1,16 @@
-# Dependencies for `python -m smartknob_deck` on Windows.
+# Dependencies for `py -m smartknob_deck` on Windows.
 #
 # Install with:
 #     py -m pip install -r requirements.txt
 #
-# The first three are the SmartKnob serial protocol (same as Pipfile). The rest
-# are the Windows backends: pycaw/comtypes for volume, screen-brightness-control
-# (plus WMI for laptop panels) for brightness.
+# The agent speaks the firmware's plaintext host-agent lines, so it needs only
+# pyserial plus the Windows backends: pycaw/comtypes for volume, and
+# screen-brightness-control (with WMI for laptop panels) for brightness.
 #
-# Note: the Pipfile pegs protobuf==3.20.3 for the other tools in this repo.
-# smartknob_deck sets PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python at import
-# time, so the checked-in *_pb2.py files load under either version.
+# The other tools in this repo (smartknob_io.py, simple_example.py) use the
+# protobuf protocol instead; install the Pipfile for those.
 
 pyserial==3.5
-cobs==1.2.2
-protobuf==7.35.1
 
 pycaw==20251023
 comtypes==1.4.16

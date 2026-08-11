@@ -193,8 +193,13 @@ void MotorTask::run() {
                     break;
                 }
                 case CommandType::HAPTIC: {
-                    // Play a hardcoded haptic "click"
-                    float strength = command.data.haptic.press ? 5 : 1.5;
+                    // Play a haptic "click", scaled by the user's click-force setting.
+                    float scale = command.data.haptic.strength_scale;
+                    if (!(scale > 0)) {
+                        scale = 1;
+                    }
+                    float strength = (command.data.haptic.press ? 5 : 1.5) * scale;
+                    strength = CLAMP(strength, (float)-FOC_VOLTAGE_LIMIT, (float)FOC_VOLTAGE_LIMIT);
                     motor.move(strength);
                     for (uint8_t i = 0; i < 3; i++) {
                         motor.loopFOC();
@@ -310,13 +315,13 @@ void MotorTask::setConfig(const PB_SmartKnobConfig& config) {
 }
 
 
-void MotorTask::playHaptic(bool press) {
+void MotorTask::playHaptic(bool press, float strength_scale) {
     Command command = {
         .command_type = CommandType::HAPTIC,
         .data = {
             .haptic = {
                 .press = press,
-
+                .strength_scale = strength_scale,
             },
         }
     };

@@ -12,9 +12,7 @@ import unittest
 
 from smartknob_deck.controller import (
     IDLE_BEFORE_POLL_SECONDS,
-    RESEND_INTERVAL_SECONDS,
-    DeckController,
-    KnobState,
+    DeckAgent,
 )
 from smartknob_deck.controls import (
     ALL_CONTROLS,
@@ -40,7 +38,7 @@ class FullRangeControl(Control):
 
 
 class FakeControl(Control):
-    # Pinned so controller tests don't depend on the travel budget
+    # Pinned so agent tests don't depend on the travel budget
     position_width_radians = math.radians(5)
 
     def __init__(self, key='fake', label='Fake', value=0, min_value=0,
@@ -68,20 +66,16 @@ class FakeControl(Control):
         self.writes.append(value)
 
 
-def make_controller(controls, clock=None, poll_interval=2.0):
+def make_agent(controls, clock=None, poll_interval=2.0):
+    """Build an agent whose outbound lines land in the returned list."""
     sent = []
-    controller = DeckController(
+    agent = DeckAgent(
         controls,
-        sent.append,
+        lambda verb, channel, value=None: sent.append((verb, channel, value)),
         poll_interval=poll_interval,
         clock=clock or FakeClock(),
     )
-    return controller, sent
-
-
-def state(position, press_nonce=0, config_text='Fake'):
-    return KnobState(current_position=position, press_nonce=press_nonce,
-                     config_text=config_text)
+    return agent, sent
 
 
 class ControlMappingTest(unittest.TestCase):
@@ -145,231 +139,205 @@ class TravelTest(unittest.TestCase):
             math.degrees(control.position_width_radians), 300)
 
 
-class ActivationTest(unittest.TestCase):
-    def test_start_sends_config_for_the_current_os_value(self):
-        control = FakeControl(value=30, led_hue=96)
-        controller, sent = make_controller([control])
+class StartupTest(unittest.TestCase):
+    def test_start_reports_every_channel(self):
+        volume = FakeControl(key='volume', label='Volume', value=30)
+        bright = FakeControl(key='brightness', label='Brightness', value=70)
+        agent, sent = make_agent([volume, bright])
 
-        controller.start()
+        agent.start()
 
-        self.assertEqual(len(sent), 1)
-        config = sent[0]
-        self.assertEqual(config.position, 30)
-        self.assertEqual(config.min_position, 0)
-        self.assertEqual(config.max_position, 100)
-        self.assertEqual(config.text, 'Fake')
-        self.assertEqual(config.led_hue, 96)
-        self.assertEqual(controller.value, 30)
+        self.assertEqual(sent, [('VAL', 'brightness', 70),
+                                ('VAL', 'volume', 30)])
 
-    def test_unreadable_control_falls_back_to_its_minimum(self):
-        control = FakeControl(min_value=5, max_value=100)
-        control.read_error = ControlUnavailable('no display')
-        controller, sent = make_controller([control])
+    def test_unreadable_channel_reports_nothing(self):
+        control = FakeControl(key='volume')
+        control.read_error = ControlUnavailable('no audio endpoint')
+        agent, sent = make_agent([control])
 
-        with self.assertLogs('smartknob_deck.controller', level='WARNING'):
-            controller.start()
+        with self.assertLogs('smartknob_deck', level='WARNING'):
+            agent.start()
 
-        self.assertEqual(controller.value, 5)
-        self.assertEqual(sent[0].position, 5)
-        self.assertEqual(sent[0].min_position, 5)
+        # Better to leave the knob on its own value than to lie about the OS.
+        self.assertEqual(sent, [])
+        self.assertIsNone(agent.value('volume'))
 
-    def test_position_nonce_stays_within_a_byte(self):
-        # The firmware stores position_nonce in a uint8
-        controls = [FakeControl(label='A'), FakeControl(label='B')]
-        controller, sent = make_controller(controls)
-        controller.start()
-        for _ in range(300):
-            controller.next_control()
-
-        self.assertEqual(len(sent), 301)
-        self.assertTrue(all(0 <= config.position_nonce < 256 for config in sent))
+    def test_empty_control_list_is_rejected(self):
+        with self.assertRaises(ValueError):
+            make_agent([])
 
 
-class RotationTest(unittest.TestCase):
-    def test_rotation_writes_the_new_value(self):
-        control = FakeControl(value=30)
-        controller, _ = make_controller([control])
-        controller.start()
+class SetTest(unittest.TestCase):
+    def test_set_writes_the_value(self):
+        control = FakeControl(key='volume')
+        agent, _ = make_agent([control])
 
-        controller.handle_state(state(20))
+        agent.handle_line('@SET volume 42')
 
-        self.assertEqual(control.writes, [20])
-        self.assertEqual(controller.value, 20)
+        self.assertEqual(control.writes, [42])
+        self.assertEqual(agent.value('volume'), 42)
 
-    def test_repeated_position_is_not_rewritten(self):
-        control = FakeControl(value=30)
-        controller, _ = make_controller([control])
-        controller.start()
+    def test_set_is_clamped_to_the_control_range(self):
+        control = FakeControl(key='volume', min_value=5, max_value=90)
+        agent, _ = make_agent([control])
 
-        controller.handle_state(state(20))
-        controller.handle_state(state(20))
+        agent.handle_line('@SET volume 300')
+        agent.handle_line('@SET volume -20')
 
-        self.assertEqual(control.writes, [20])
+        self.assertEqual(control.writes, [90, 5])
 
     def test_writes_are_coalesced_while_rate_limited(self):
         clock = FakeClock()
-        control = FakeControl(value=0, min_write_interval=0.15)
-        controller, _ = make_controller([control], clock=clock)
-        controller.start()
+        control = FakeControl(key='brightness', min_write_interval=0.15)
+        agent, _ = make_agent([control], clock=clock)
 
-        controller.handle_state(state(1))
-        controller.handle_state(state(2))
-        controller.handle_state(state(3))
-        self.assertEqual(control.writes, [1])
+        for value in (10, 11, 12, 13):
+            agent.handle_line(f'@SET brightness {value}')
 
+        # Only the first got through; the rest collapsed into one pending write.
+        self.assertEqual(control.writes, [10])
         clock.advance(0.2)
-        controller.tick()
-        self.assertEqual(control.writes, [1, 3])
+        agent.tick()
+        self.assertEqual(control.writes, [10, 13])
 
-    def test_failed_write_is_logged_and_does_not_stick(self):
-        control = FakeControl(value=30)
-        control.write_error = ControlUnavailable('display went away')
-        controller, _ = make_controller([control])
-        controller.start()
+    def test_failed_write_does_not_stick_around(self):
+        control = FakeControl(key='volume')
+        control.write_error = ControlUnavailable('device disappeared')
+        agent, _ = make_agent([control])
 
-        with self.assertLogs('smartknob_deck.controller', level='WARNING'):
-            controller.handle_state(state(20))
-        controller.tick()
+        with self.assertLogs('smartknob_deck', level='WARNING'):
+            agent.handle_line('@SET volume 55')
+        agent.tick()
 
         self.assertEqual(control.writes, [])
 
+    def test_unknown_channel_is_ignored(self):
+        control = FakeControl(key='volume')
+        agent, sent = make_agent([control])
 
-class PressTest(unittest.TestCase):
+        agent.handle_line('@SET fan 3')
+        agent.handle_line('@GET fan')
+
+        self.assertEqual(control.writes, [])
+        self.assertEqual(sent, [])
+
+    def test_malformed_lines_are_ignored(self):
+        control = FakeControl(key='volume')
+        agent, sent = make_agent([control])
+
+        for line in ('', 'hello', '@SET', '@SET volume', '@SET volume loud',
+                     'SET volume 40', '@'):
+            agent.handle_line(line)
+
+        self.assertEqual(control.writes, [])
+        self.assertEqual(sent, [])
+
+
+class GetTest(unittest.TestCase):
+    def test_get_answers_with_the_os_value(self):
+        control = FakeControl(key='volume', value=64)
+        agent, sent = make_agent([control])
+
+        agent.handle_line('@GET volume')
+
+        self.assertEqual(sent, [('VAL', 'volume', 64)])
+
+    def test_get_reflects_a_later_external_change(self):
+        control = FakeControl(key='volume', value=20)
+        agent, sent = make_agent([control])
+
+        agent.handle_line('@GET volume')
+        control.value = 80
+        agent.handle_line('@GET volume')
+
+        self.assertEqual(sent, [('VAL', 'volume', 20), ('VAL', 'volume', 80)])
+
+
+class ExternalChangeTest(unittest.TestCase):
     def setUp(self):
-        self.volume = FakeControl(key='volume', label='Volume', value=30)
-        self.brightness = FakeControl(key='brightness', label='Brightness',
-                                      value=50, min_value=5)
-        self.controller, self.sent = make_controller([self.volume, self.brightness])
+        self.clock = FakeClock()
+        self.control = FakeControl(key='volume', value=30)
+        # Polling faster than the quiet window, so both gates are visible here.
+        self.agent, self.sent = make_agent([self.control], clock=self.clock,
+                                           poll_interval=0.1)
+        self.agent.start()
+        self.sent.clear()
 
-    def test_first_state_only_establishes_a_press_baseline(self):
-        self.controller.start()
+    def settle(self):
+        """Move past both the poll interval and the post-rotation quiet time."""
+        self.clock.advance(IDLE_BEFORE_POLL_SECONDS + 0.1)
 
-        self.controller.handle_state(state(15, press_nonce=7))
+    def test_external_change_is_pushed_to_the_knob(self):
+        self.control.value = 75
+        self.settle()
+        self.agent.tick()
 
-        self.assertIs(self.controller.active_control, self.volume)
-        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.sent, [('VAL', 'volume', 75)])
+        self.assertEqual(self.agent.value('volume'), 75)
 
-    def test_press_switches_control_and_sends_its_config(self):
-        self.controller.start()
-        self.controller.handle_state(state(15, press_nonce=7))
+    def test_unchanged_value_is_not_resent(self):
+        self.settle()
+        self.agent.tick()
+        self.settle()
+        self.agent.tick()
 
-        self.controller.handle_state(state(15, press_nonce=8))
+        self.assertEqual(self.sent, [])
 
-        self.assertIs(self.controller.active_control, self.brightness)
-        self.assertEqual(self.sent[-1].text, 'Brightness')
-        self.assertEqual(self.sent[-1].position, 50)
-        self.assertEqual(self.controller.value, 50)
+    def test_polling_waits_until_the_knob_settles(self):
+        self.agent.handle_line('@SET volume 40')
+        self.control.value = 90  # something else moved it mid-turn
 
-    def test_press_ignores_the_position_from_the_old_config(self):
-        self.controller.start()
-        self.controller.handle_state(state(15, press_nonce=7))
+        self.clock.advance(0.2)
+        self.agent.tick()
+        # Still inside the quiet window, so the knob keeps control.
+        self.assertEqual(self.sent, [])
 
-        # Same snapshot position, but it belongs to the volume config we just left
-        self.controller.handle_state(state(15, press_nonce=8))
+        self.settle()
+        self.agent.tick()
+        self.assertEqual(self.sent, [('VAL', 'volume', 90)])
 
-        self.assertEqual(self.brightness.writes, [])
-        self.assertEqual(self.volume.writes, [])
-
-    def test_press_wraps_around_the_control_list(self):
-        self.controller.start()
-        self.controller.handle_state(state(15, press_nonce=1))
-        self.controller.handle_state(state(15, press_nonce=2))
-        self.controller.handle_state(state(9, press_nonce=3,
-                                          config_text='Brightness'))
-
-        self.assertIs(self.controller.active_control, self.volume)
-
-    def test_single_control_ignores_presses(self):
-        controller, sent = make_controller([self.volume])
-        controller.start()
-        controller.handle_state(state(15, press_nonce=1))
-
-        controller.handle_state(state(15, press_nonce=2))
-
-        self.assertIs(controller.active_control, self.volume)
-        self.assertEqual(len(sent), 1)
-
-
-class SyncTest(unittest.TestCase):
-    def test_states_from_another_config_are_not_applied(self):
-        control = FakeControl(value=30)
-        controller, _ = make_controller([control])
-        controller.start()
-
-        controller.handle_state(state(3, config_text='Unbounded\nNo detents'))
-
-        self.assertEqual(control.writes, [])
-
-    def test_config_is_resent_when_the_knob_is_out_of_sync(self):
+    def test_pending_write_defers_polling(self):
         clock = FakeClock()
-        control = FakeControl(value=30)
-        controller, sent = make_controller([control], clock=clock)
-        controller.start()
+        control = FakeControl(key='brightness', value=30, min_write_interval=10)
+        agent, sent = make_agent([control], clock=clock, poll_interval=0.5)
 
-        stale = state(3, config_text='On/off\nStrong detent')
-        controller.handle_state(stale)
-        self.assertEqual(len(sent), 1, 'resend should be rate limited')
+        agent.handle_line('@SET brightness 40')  # written immediately
+        agent.handle_line('@SET brightness 45')  # queued behind the interval
+        clock.advance(5)
+        agent.tick()
 
-        clock.advance(RESEND_INTERVAL_SECONDS)
-        with self.assertLogs('smartknob_deck.controller', level='INFO'):
-            controller.handle_state(stale)
-
-        self.assertEqual(len(sent), 2)
-        self.assertEqual(sent[-1].text, 'Fake')
-        self.assertEqual(sent[-1].position, 30)
-
-    def test_external_change_moves_the_knob(self):
-        clock = FakeClock()
-        control = FakeControl(value=30)
-        controller, sent = make_controller([control], clock=clock,
-                                           poll_interval=2.0)
-        controller.start()
-
-        control.value = 60  # e.g. the user hit the volume keys
-        clock.advance(2.0)
-        with self.assertLogs('smartknob_deck.controller', level='INFO'):
-            controller.tick()
-
-        self.assertEqual(controller.value, 60)
-        self.assertEqual(sent[-1].position, 60)
-        self.assertEqual(control.writes, [], 'polling should not write back')
-
-    def test_polling_waits_until_rotation_settles(self):
-        clock = FakeClock()
-        control = FakeControl(value=30)
-        controller, sent = make_controller([control], clock=clock,
-                                           poll_interval=0)
-        controller.start()
-        controller.handle_state(state(20))
-
-        control.value = 90
-        clock.advance(IDLE_BEFORE_POLL_SECONDS / 2)
-        controller.tick()
-        self.assertEqual(len(sent), 1)
-
-        clock.advance(IDLE_BEFORE_POLL_SECONDS)
-        controller.tick()
-        self.assertEqual(len(sent), 2)
-        self.assertEqual(controller.value, 90)
+        # Reading now would return the stale 40 and fight the queued write.
+        self.assertEqual(sent, [])
 
     def test_unreadable_control_does_not_break_polling(self):
+        self.control.read_error = ControlUnavailable('device disappeared')
+        self.settle()
+        self.agent.tick()
+
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.agent.value('volume'), 30)
+
+    def test_channels_are_polled_independently(self):
         clock = FakeClock()
-        control = FakeControl(value=30)
-        controller, sent = make_controller([control], clock=clock,
-                                           poll_interval=0)
-        controller.start()
-        control.read_error = ControlUnavailable('device busy')
+        volume = FakeControl(key='volume', value=10)
+        bright = FakeControl(key='brightness', value=20)
+        agent, sent = make_agent([volume, bright], clock=clock,
+                                 poll_interval=0.1)
+        agent.start()
+        sent.clear()
 
-        clock.advance(IDLE_BEFORE_POLL_SECONDS + 1)
-        controller.tick()
+        agent.handle_line('@SET volume 15')
+        bright.value = 60
+        clock.advance(IDLE_BEFORE_POLL_SECONDS - 0.1)
+        agent.tick()
 
-        self.assertEqual(len(sent), 1)
-        self.assertEqual(controller.value, 30)
+        # Brightness is free to report even though volume is still settling.
+        self.assertEqual(sent, [('VAL', 'brightness', 60)])
 
 
 def setUpModule():
-    # Keep the controller's INFO chatter out of the test output; assertLogs
-    # still captures what the tests care about.
+    # Keep the agent's INFO chatter out of the test output; assertLogs still
+    # captures what the tests care about.
     logging.getLogger('smartknob_deck').setLevel(logging.WARNING)
 
 

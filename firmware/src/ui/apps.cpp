@@ -22,6 +22,8 @@ const AppDescriptor APPS[] = {
         PressAction::MUTE,
         nullptr,
         0,
+        AppKind::VALUE,
+        HostChannel::VOLUME,
         {
             30, 0, 0,
             0, 100, 3.6 * PI / 180,
@@ -39,6 +41,8 @@ const AppDescriptor APPS[] = {
         PressAction::NONE,
         nullptr,
         0,
+        AppKind::VALUE,
+        HostChannel::BRIGHTNESS,
         {
             60, 0, 0,
             0, 100, 3.6 * PI / 180,
@@ -49,6 +53,46 @@ const AppDescriptor APPS[] = {
         },
     },
     {
+        "TIMER",
+        "Press to start",
+        AppIcon::TIMER,
+        ValueStyle::MINUTES,
+        PressAction::START_STOP,
+        nullptr,
+        0,
+        AppKind::TIMER,
+        HostChannel::NONE,
+        {
+            10, 0, 0,
+            0, 60, 6 * PI / 180,
+            0.6, 1, 1.1,
+            "Timer",
+            0, {}, 0,
+            22,
+        },
+    },
+    {
+        "SETTINGS",
+        "Tune the knob",
+        AppIcon::SETTINGS,
+        ValueStyle::COUNT,
+        PressAction::NONE,
+        nullptr,
+        0,
+        AppKind::SETTINGS,
+        HostChannel::NONE,
+        {
+            0, 0, 0,
+            0, 0, 20 * PI / 180,
+            1, 1, 1.1,
+            "Settings",
+            0, {}, 0,
+            44,
+        },
+    },
+    // Below here: kept for later, not listed in MENU_ITEMS. Light lives in the
+    // settings list now (SettingId::LED_RING) rather than as its own page.
+    {
         "LIGHT",
         "Hard detent",
         AppIcon::BULB,
@@ -56,6 +100,8 @@ const AppDescriptor APPS[] = {
         PressAction::TOGGLE,
         LIGHT_LABELS,
         2,
+        AppKind::VALUE,
+        HostChannel::NONE,
         {
             0, 0, 0,
             0, 1, 60 * PI / 180,
@@ -73,6 +119,8 @@ const AppDescriptor APPS[] = {
         PressAction::CYCLE,
         FAN_LABELS,
         4,
+        AppKind::VALUE,
+        HostChannel::NONE,
         {
             0, 0, 0,
             0, 3, 30 * PI / 180,
@@ -90,6 +138,8 @@ const AppDescriptor APPS[] = {
         PressAction::NONE,
         nullptr,
         0,
+        AppKind::VALUE,
+        HostChannel::NONE,
         {
             0, 0, 0,
             0, -1,  // max < min: no endstops, spins forever
@@ -100,31 +150,23 @@ const AppDescriptor APPS[] = {
             34,
         },
     },
-    {
-        "TIMER",
-        "One hour",
-        AppIcon::TIMER,
-        ValueStyle::MINUTES,
-        PressAction::NONE,
-        nullptr,
-        0,
-        {
-            10, 0, 0,
-            0, 60, 6 * PI / 180,
-            0.6, 1, 1.1,
-            "Timer",
-            0, {}, 0,
-            22,
-        },
-    },
 };
 
 const uint8_t APP_COUNT = sizeof(APPS) / sizeof(APPS[0]);
 
+const uint8_t MENU_ITEMS[] = {
+    APP_VOLUME,
+    APP_BRIGHTNESS,
+    APP_TIMER,
+    APP_SETTINGS,
+};
+
+const uint8_t MENU_ITEM_COUNT = sizeof(MENU_ITEMS) / sizeof(MENU_ITEMS[0]);
+
 PB_SmartKnobConfig menuConfig(uint8_t selected) {
     PB_SmartKnobConfig config = {
         selected, 0, 0,
-        0, APP_COUNT - 1, 43 * PI / 180,
+        0, MENU_ITEM_COUNT - 1, 43 * PI / 180,
         1.3, 1, 1.1,
         "Menu",
         0, {}, 0,
@@ -142,3 +184,13 @@ const char* appStepLabel(const AppDescriptor& app, int32_t position) {
     }
     return app.step_labels[position];
 }
+
+uint8_t menuSlotForApp(uint8_t app_index) {
+    for (uint8_t i = 0; i < MENU_ITEM_COUNT; i++) {
+        if (MENU_ITEMS[i] == app_index) {
+            return i;
+        }
+    }
+    return 0;
+}
+

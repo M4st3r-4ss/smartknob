@@ -18,7 +18,8 @@ enum class CommandType {
 
 struct HapticData {
     bool press;
-
+    /** Multiplier on the click torque, so the settings page can tune the feel. */
+    float strength_scale;
 };
 
 struct Command {
@@ -39,7 +40,7 @@ class MotorTask : public Task<MotorTask> {
         ~MotorTask();
 
         void setConfig(const PB_SmartKnobConfig& config);
-        void playHaptic(bool press);
+        void playHaptic(bool press, float strength_scale = 1);
         void runCalibration();
 
         void addListener(QueueHandle_t queue);

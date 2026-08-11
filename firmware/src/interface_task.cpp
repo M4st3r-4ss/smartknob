@@ -82,6 +82,14 @@ void InterfaceTask::run() {
 
     // app_position_ is sized from APP_SLOTS, but APP_COUNT is only known at link time.
     assert(APP_COUNT > 0 && APP_COUNT <= APP_SLOTS);
+    assert(SETTING_COUNT <= COUNT_OF(ui_state_.setting_values));
+
+    settings_.begin();
+    publishSettingValues();
+
+    for (uint8_t i = 0; i < APP_COUNT; i++) {
+        app_position_[i] = APPS[i].config.position;
+    }
 
     motor_task_.addListener(knob_state_queue_);
     openMenu();
@@ -91,31 +99,11 @@ void InterfaceTask::run() {
     }, [this] () {
         handleBack();
     }, [this] () {
-        if (!configuration_loaded_) {
-            return;
-        }
-        if (strain_calibration_step_ == 0) {
-            log("Strain calibration step 1: Don't touch the knob, then press 'S' again");
-            strain_calibration_step_ = 1;
-        } else if (strain_calibration_step_ == 1) {
-            configuration_value_.strain.idle_value = strain_reading_;
-            snprintf(buf_, sizeof(buf_), "  idle_value=%d", configuration_value_.strain.idle_value);
-            log(buf_);
-            log("Strain calibration step 2: Push and hold down the knob with medium pressure, and press 'S' again");
-            strain_calibration_step_ = 2;
-        } else if (strain_calibration_step_ == 2) {
-            configuration_value_.strain.press_delta = strain_reading_ - configuration_value_.strain.idle_value;
-            configuration_value_.has_strain = true;
-            snprintf(buf_, sizeof(buf_), "  press_delta=%d", configuration_value_.strain.press_delta);
-            log(buf_);
-            log("Strain calibration complete! Saving...");
-            strain_calibration_step_ = 0;
-            if (configuration_->setStrainCalibrationAndSave(configuration_value_.strain)) {
-                log("  Saved!");
-            } else {
-                log("  FAILED to save config!!!");
-            }
-        }
+        startStrainCalibration();
+    });
+
+    plaintext_protocol_.setHostValueCallback([this] (const char* channel, int32_t value) {
+        handleHostValue(channel, value);
     });
 
     // Start in legacy protocol mode
@@ -144,11 +132,42 @@ void InterfaceTask::run() {
             publishState();
 
             if (ui_state_.mode == UiMode::MENU) {
-                menu_selection_ = (uint8_t)CLAMP(latest_state_.current_position, (int32_t)0, (int32_t)(APP_COUNT - 1));
+                menu_selection_ = (uint8_t)CLAMP(latest_state_.current_position, (int32_t)0, (int32_t)(MENU_ITEM_COUNT - 1));
+                ui_state_.app_index = MENU_ITEMS[menu_selection_];
+                publishUiState();
             } else if (ui_state_.mode == UiMode::APP) {
+                int32_t previous = app_position_[ui_state_.app_index];
                 app_position_[ui_state_.app_index] = latest_state_.current_position;
+                if (latest_state_.current_position != previous) {
+                    // Turning the knob cancels a countdown rather than fighting it.
+                    if (currentApp().kind == AppKind::TIMER) {
+                        timer_deadline_ms_ = 0;
+                        timer_paused_s_ = 0;
+                        ui_state_.timer_running = false;
+                        ui_state_.timer_remaining_s = 0;
+                        ui_state_.timer_total_s = 0;
+                        ui_state_.timer_elapsed = false;
+                    }
+                    noteHostValue();
+                    publishUiState();
+                }
+            } else if (ui_state_.mode == UiMode::SETTINGS) {
+                setting_selection_ = (uint8_t)CLAMP(latest_state_.current_position, (int32_t)0, (int32_t)(SETTING_COUNT - 1));
+                ui_state_.setting_index = setting_selection_;
+                publishUiState();
+            } else if (ui_state_.mode == UiMode::SETTING_EDIT) {
+                SettingId id = (SettingId)setting_selection_;
+                int16_t before = settings_.get(id);
+                settings_.set(id, (int16_t)latest_state_.current_position);
+                if (settings_.get(id) != before) {
+                    publishSettingValues();
+                    publishUiState();
+                }
             }
         }
+
+        tickTimer();
+        flushHostValue();
 
         current_protocol_->loop();
 
@@ -182,17 +201,21 @@ void InterfaceTask::log(const char* msg) {
 
 void InterfaceTask::openMenu() {
     ui_state_.mode = UiMode::MENU;
+    ui_state_.app_index = MENU_ITEMS[menu_selection_];
     ui_state_.hold_progress = 0;
     ui_state_.mode_nonce++;
     publishUiState();
 
-    PB_SmartKnobConfig config = menuConfig(menu_selection_);
-    config.position_nonce = local_nonce_++;
-    applyConfig(config, false);
+    applyLocalConfig(menuConfig(menu_selection_));
 }
 
 void InterfaceTask::openApp(uint8_t index) {
     const AppDescriptor& app = APPS[index];
+
+    if (app.kind == AppKind::SETTINGS) {
+        openSettings();
+        return;
+    }
 
     bool entering = ui_state_.mode != UiMode::APP || ui_state_.app_index != index;
 
@@ -208,11 +231,47 @@ void InterfaceTask::openApp(uint8_t index) {
     PB_SmartKnobConfig config = app.config;
     config.position = app_position_[index];
     config.sub_position_unit = 0;
-    config.position_nonce = local_nonce_++;
-    applyConfig(config, false);
+    applyLocalConfig(config);
 
-    snprintf(buf_, sizeof(buf_), "Opening %s", app.name);
-    log(buf_);
+    if (entering) {
+        // Open on whatever the OS currently has, not on a stale local value.
+        requestHostValue(app.host_channel);
+        snprintf(buf_, sizeof(buf_), "Opening %s", app.name);
+        log(buf_);
+    } else {
+        noteHostValue();
+    }
+}
+
+void InterfaceTask::openSettings() {
+    ui_state_.mode = UiMode::SETTINGS;
+    ui_state_.app_index = APP_SETTINGS;
+    ui_state_.setting_index = setting_selection_;
+    ui_state_.hold_progress = 0;
+    ui_state_.mode_nonce++;
+    publishSettingValues();
+    publishUiState();
+
+    applyLocalConfig(settingsListConfig(setting_selection_));
+}
+
+void InterfaceTask::openSettingEdit(uint8_t index) {
+    const SettingDescriptor& d = settingAt(index);
+    if (d.kind == SettingKind::ACTION) {
+        if ((SettingId)index == SettingId::STRAIN_CALIBRATE) {
+            startStrainCalibration();
+        }
+        return;
+    }
+
+    setting_selection_ = index;
+    ui_state_.mode = UiMode::SETTING_EDIT;
+    ui_state_.setting_index = index;
+    ui_state_.hold_progress = 0;
+    ui_state_.mode_nonce++;
+    publishUiState();
+
+    applyLocalConfig(settingEditConfig((SettingId)index, settings_.get((SettingId)index)));
 }
 
 void InterfaceTask::handlePress() {
@@ -225,7 +284,22 @@ void InterfaceTask::handlePress() {
     }
 
     if (ui_state_.mode == UiMode::MENU) {
-        openApp(menu_selection_);
+        ui_state_.press_nonce++;
+        openApp(MENU_ITEMS[menu_selection_]);
+        return;
+    }
+
+    if (ui_state_.mode == UiMode::SETTINGS) {
+        ui_state_.press_nonce++;
+        openSettingEdit(setting_selection_);
+        return;
+    }
+
+    if (ui_state_.mode == UiMode::SETTING_EDIT) {
+        // A press confirms the value and drops back to the list.
+        ui_state_.press_nonce++;
+        settings_.commit();
+        openSettings();
         return;
     }
 
@@ -257,6 +331,9 @@ void InterfaceTask::handlePress() {
             }
             changed = true;
             break;
+        case PressAction::START_STOP:
+            toggleTimer();
+            break;
         case PressAction::NONE:
             break;
     }
@@ -265,6 +342,7 @@ void InterfaceTask::handlePress() {
     if (changed) {
         // Re-send the config to snap the motor to the new position.
         openApp(index);
+        noteHostValue();
     } else {
         publishUiState();
     }
@@ -274,8 +352,16 @@ void InterfaceTask::handleBack() {
     if (ui_state_.mode == UiMode::MENU) {
         return;
     }
+    motor_task_.playHaptic(false, settings_.clickForceScale());
+
+    if (ui_state_.mode == UiMode::SETTING_EDIT) {
+        // One level at a time: edit -> list -> menu.
+        settings_.commit();
+        openSettings();
+        return;
+    }
+
     remote_controlled_ = false;
-    motor_task_.playHaptic(false);
     openMenu();
 }
 
@@ -283,6 +369,285 @@ void InterfaceTask::publishUiState() {
     #if SK_DISPLAY
         display_task_->setUiState(ui_state_);
     #endif
+}
+
+const AppDescriptor& InterfaceTask::currentApp() const {
+    return APPS[ui_state_.app_index < APP_COUNT ? ui_state_.app_index : 0];
+}
+
+void InterfaceTask::publishSettingValues() {
+    for (uint8_t i = 0; i < SETTING_COUNT; i++) {
+        ui_state_.setting_values[i] = settings_.get((SettingId)i);
+    }
+}
+
+void InterfaceTask::reapplyCurrentConfig() {
+    switch (ui_state_.mode) {
+        case UiMode::MENU:
+            applyLocalConfig(menuConfig(menu_selection_));
+            break;
+        case UiMode::SETTINGS:
+            applyLocalConfig(settingsListConfig(setting_selection_));
+            break;
+        case UiMode::SETTING_EDIT: {
+            SettingId id = (SettingId)setting_selection_;
+            applyLocalConfig(settingEditConfig(id, settings_.get(id)));
+            break;
+        }
+        case UiMode::APP: {
+            PB_SmartKnobConfig config = currentApp().config;
+            config.position = app_position_[ui_state_.app_index];
+            config.sub_position_unit = 0;
+            applyLocalConfig(config);
+            break;
+        }
+        case UiMode::REMOTE:
+            break;
+    }
+}
+
+void InterfaceTask::startStrainCalibration() {
+    #if SK_STRAIN
+        if (!configuration_loaded_) {
+            log("Configuration not loaded yet; try again in a moment");
+            return;
+        }
+        if (strain_calibration_step_ != 0) {
+            // A second trigger cancels, rather than leaving it stuck mid-flow.
+            log("Strain calibration cancelled");
+            strain_calibration_step_ = 0;
+            ui_state_.calibration_step = 0;
+            publishUiState();
+            return;
+        }
+        strain_calibration_step_ = 1;
+        calib_phase_ms_ = millis();
+        ui_state_.calibration_step = 1;
+        publishUiState();
+        log("Strain calibration: let go of the knob...");
+    #else
+        log("No strain sensor on this build");
+    #endif
+}
+
+void InterfaceTask::updateStrainCalibration() {
+    #if SK_STRAIN
+        if (strain_calibration_step_ == 1) {
+            if (millis() - calib_phase_ms_ < CALIB_SETTLE_MS) {
+                return;
+            }
+            configuration_value_.strain.idle_value = strain_reading_;
+            snprintf(buf_, sizeof(buf_), "  idle_value=%d", configuration_value_.strain.idle_value);
+            log(buf_);
+            log("Now push the knob down firmly, then let go");
+            strain_calibration_step_ = 2;
+            calib_phase_ms_ = millis();
+            calib_peak_ = strain_reading_;
+            ui_state_.calibration_step = 2;
+            publishUiState();
+            return;
+        }
+
+        if (strain_calibration_step_ != 2) {
+            return;
+        }
+
+        if (strain_reading_ > calib_peak_) {
+            calib_peak_ = strain_reading_;
+        }
+
+        int32_t idle = configuration_value_.strain.idle_value;
+        int32_t peak_delta = calib_peak_ - idle;
+        bool pushed = peak_delta >= CALIB_MIN_PRESS_DELTA;
+        // Released once the reading has fallen back to the bottom quarter of the push.
+        bool released = pushed && (strain_reading_ - idle) < peak_delta / 4;
+
+        if (pushed && released) {
+            configuration_value_.strain.press_delta = peak_delta;
+            configuration_value_.has_strain = true;
+            snprintf(buf_, sizeof(buf_), "  press_delta=%d", configuration_value_.strain.press_delta);
+            log(buf_);
+            strain_calibration_step_ = 0;
+            ui_state_.calibration_step = 0;
+            publishUiState();
+            if (configuration_->setStrainCalibrationAndSave(configuration_value_.strain)) {
+                log("Strain calibration saved");
+            } else {
+                log("FAILED to save strain calibration!");
+            }
+            motor_task_.playHaptic(true, settings_.clickForceScale());
+        } else if (millis() - calib_phase_ms_ > CALIB_PUSH_TIMEOUT_MS) {
+            log("Strain calibration timed out; nothing saved");
+            strain_calibration_step_ = 0;
+            ui_state_.calibration_step = 0;
+            publishUiState();
+        }
+    #endif
+}
+
+void InterfaceTask::toggleTimer() {
+    if (ui_state_.timer_elapsed) {
+        // Acknowledge a finished countdown instead of immediately re-arming.
+        ui_state_.timer_elapsed = false;
+        ui_state_.timer_remaining_s = 0;
+        ui_state_.timer_total_s = 0;
+        return;
+    }
+
+    if (timer_deadline_ms_ != 0) {
+        // Running -> paused: keep whatever is left.
+        uint32_t now = millis();
+        timer_paused_s_ = timer_deadline_ms_ > now ? (timer_deadline_ms_ - now + 999) / 1000 : 0;
+        timer_deadline_ms_ = 0;
+        ui_state_.timer_running = false;
+        ui_state_.timer_remaining_s = timer_paused_s_;
+        return;
+    }
+
+    uint32_t seconds = timer_paused_s_;
+    if (seconds == 0) {
+        // Fresh start: the dial reads in minutes.
+        int32_t minutes = app_position_[ui_state_.app_index];
+        seconds = (uint32_t)CLAMP(minutes, (int32_t)0, (int32_t)600) * 60;
+        ui_state_.timer_total_s = seconds;
+    }
+    if (seconds == 0) {
+        return;
+    }
+    timer_paused_s_ = 0;
+    timer_deadline_ms_ = millis() + seconds * 1000;
+    ui_state_.timer_running = true;
+    ui_state_.timer_remaining_s = seconds;
+    timer_last_shown_s_ = seconds;
+}
+
+void InterfaceTask::tickAlert() {
+    if (alert_pulses_left_ == 0 || (int32_t)(millis() - alert_next_ms_) < 0) {
+        return;
+    }
+    // Alternating kick and release reads as a distinct double-buzz.
+    motor_task_.playHaptic(alert_pulses_left_ % 2 == 0, settings_.clickForceScale());
+    alert_pulses_left_--;
+    alert_next_ms_ = millis() + 100;
+}
+
+void InterfaceTask::tickTimer() {
+    tickAlert();
+
+    if (timer_deadline_ms_ == 0) {
+        return;
+    }
+
+    uint32_t now = millis();
+    uint32_t remaining_s = 0;
+    if ((int32_t)(timer_deadline_ms_ - now) > 0) {
+        remaining_s = (timer_deadline_ms_ - now + 999) / 1000;
+    }
+
+    if (remaining_s == 0) {
+        timer_deadline_ms_ = 0;
+        timer_paused_s_ = 0;
+        ui_state_.timer_running = false;
+        ui_state_.timer_remaining_s = 0;
+        ui_state_.timer_elapsed = true;
+        publishUiState();
+        log("Timer finished");
+        // Pulsed rather than blocking, so serial and press detection keep running.
+        alert_pulses_left_ = 6;
+        alert_next_ms_ = now;
+        return;
+    }
+
+    if (remaining_s != timer_last_shown_s_) {
+        timer_last_shown_s_ = remaining_s;
+        ui_state_.timer_remaining_s = remaining_s;
+        publishUiState();
+    }
+}
+
+const char* InterfaceTask::channelName(HostChannel channel) {
+    switch (channel) {
+        case HostChannel::VOLUME:
+            return "volume";
+        case HostChannel::BRIGHTNESS:
+            return "brightness";
+        case HostChannel::NONE:
+        default:
+            return nullptr;
+    }
+}
+
+void InterfaceTask::noteHostValue() {
+    if (ui_state_.mode != UiMode::APP) {
+        return;
+    }
+    if (currentApp().host_channel == HostChannel::NONE) {
+        return;
+    }
+    host_send_pending_ = true;
+}
+
+void InterfaceTask::flushHostValue() {
+    if (!host_send_pending_ || ui_state_.mode != UiMode::APP) {
+        return;
+    }
+    HostChannel channel = currentApp().host_channel;
+    const char* name = channelName(channel);
+    if (name == nullptr) {
+        host_send_pending_ = false;
+        return;
+    }
+    if (millis() - host_send_last_ms_ < HOST_SEND_INTERVAL_MS) {
+        return;
+    }
+
+    int32_t value = app_position_[ui_state_.app_index];
+    host_send_pending_ = false;
+    host_send_last_ms_ = millis();
+    if (channel == host_sent_channel_ && value == host_sent_value_) {
+        return;
+    }
+    host_sent_channel_ = channel;
+    host_sent_value_ = value;
+    plaintext_protocol_.sendHostSet(name, value);
+}
+
+void InterfaceTask::requestHostValue(HostChannel channel) {
+    const char* name = channelName(channel);
+    if (name == nullptr) {
+        return;
+    }
+    // Forget the last sent value so the reply is not mistaken for an echo.
+    host_sent_channel_ = HostChannel::NONE;
+    host_sent_value_ = INT32_MIN;
+    host_send_pending_ = false;
+    plaintext_protocol_.sendHostGet(name);
+}
+
+void InterfaceTask::handleHostValue(const char* channel, int32_t value) {
+    for (uint8_t i = 0; i < APP_COUNT; i++) {
+        const char* name = channelName(APPS[i].host_channel);
+        if (name == nullptr || strcmp(name, channel) != 0) {
+            continue;
+        }
+
+        int32_t clamped = CLAMP(value, APPS[i].config.min_position, APPS[i].config.max_position);
+        if (app_position_[i] == clamped) {
+            return;
+        }
+        app_position_[i] = clamped;
+
+        // Only re-seat the motor if that app is the one on screen; otherwise the
+        // value is just remembered for the next time it is opened.
+        if (ui_state_.mode == UiMode::APP && ui_state_.app_index == i) {
+            host_sent_channel_ = APPS[i].host_channel;
+            host_sent_value_ = clamped;
+            host_send_pending_ = false;
+            reapplyCurrentConfig();
+            publishUiState();
+        }
+        return;
+    }
 }
 
 void InterfaceTask::updateHardware() {
@@ -312,9 +677,14 @@ void InterfaceTask::updateHardware() {
                 log(buf_);
                 last_reading_display = millis();
             }
-            if (configuration_loaded_ && configuration_value_.has_strain && strain_calibration_step_ == 0) {
+            if (strain_calibration_step_ != 0) {
+                updateStrainCalibration();
+            } else if (configuration_loaded_ && configuration_value_.has_strain) {
+                // The press-force setting scales the calibrated span, so 1.0 lands
+                // at a lighter or firmer push than the calibration itself used.
+                float span = configuration_value_.strain.press_delta * settings_.pressThreshold();
                 // TODO: calibrate and track (long term moving average) idle point (lower)
-                press_value_unit = lerp(strain_reading_, configuration_value_.strain.idle_value, configuration_value_.strain.idle_value + configuration_value_.strain.press_delta, 0, 1);
+                press_value_unit = lerp(strain_reading_, configuration_value_.strain.idle_value, configuration_value_.strain.idle_value + span, 0, 1);
 
                 // Ignore readings that are way out of expected bounds
                 if (-1 < press_value_unit && press_value_unit < 2) {
@@ -322,7 +692,7 @@ void InterfaceTask::updateHardware() {
                     if (!knob_pressed_ && press_value_unit > 1) {
                         press_readings++;
                         if (press_readings > 2) {
-                            motor_task_.playHaptic(true);
+                            motor_task_.playHaptic(true, settings_.clickForceScale());
                             knob_pressed_ = true;
                             press_started_ms_ = millis();
                             hold_consumed_ = false;
@@ -332,7 +702,7 @@ void InterfaceTask::updateHardware() {
                     } else if (knob_pressed_ && press_value_unit < 0.5) {
                         press_readings++;
                         if (press_readings > 2) {
-                            motor_task_.playHaptic(false);
+                            motor_task_.playHaptic(false, settings_.clickForceScale());
                             knob_pressed_ = false;
                             // A hold already acted, so the release must not.
                             if (!hold_consumed_) {
@@ -372,9 +742,12 @@ void InterfaceTask::updateHardware() {
     #endif
 
     uint16_t brightness = UINT16_MAX;
-    // TODO: brightness scale factor should be configurable (depends on reflectivity of surface)
+    // The floor is user-configurable: how dim the screen may go in a dark room.
+    uint16_t min_backlight = settings_.minBacklight();
     #if SK_ALS
-        brightness = (uint16_t)CLAMP(lux_avg * 13000, (float)1280, (float)UINT16_MAX);
+        brightness = (uint16_t)CLAMP(lux_avg * 13000, (float)min_backlight, (float)UINT16_MAX);
+    #else
+        brightness = max(min_backlight, brightness);
     #endif
 
     #if SK_DISPLAY
@@ -382,8 +755,10 @@ void InterfaceTask::updateHardware() {
     #endif
 
     #if SK_LEDS
+        // The ring follows the ambient level, capped by the user's LED setting.
+        uint8_t led_value = (uint8_t)((uint32_t)settings_.ledBrightness() * (brightness >> 8) / 255);
         for (uint8_t i = 0; i < NUM_LEDS; i++) {
-            leds[i].setHSV(latest_config_.led_hue, 255 - 180*CLAMP(press_value_unit, (float)0, (float)1) - 75*knob_pressed_, brightness >> 8);
+            leds[i].setHSV(latest_config_.led_hue, 255 - 180*CLAMP(press_value_unit, (float)0, (float)1) - 75*knob_pressed_, led_value);
 
             // Gamma adjustment
             leds[i].r = dim8_video(leds[i].r);
@@ -403,6 +778,14 @@ void InterfaceTask::publishState() {
     // Apply local state before publishing to serial
     latest_state_.press_nonce = press_count_;
     current_protocol_->handleState(latest_state_);
+}
+
+void InterfaceTask::applyLocalConfig(PB_SmartKnobConfig config) {
+    // The knob-strength setting scales every page's detents together.
+    config.detent_strength_unit *= settings_.knobStrengthScale();
+    config.endstop_strength_unit *= settings_.knobStrengthScale();
+    config.position_nonce = local_nonce_++;
+    applyConfig(config, false);
 }
 
 void InterfaceTask::applyConfig(PB_SmartKnobConfig& config, bool from_remote) {

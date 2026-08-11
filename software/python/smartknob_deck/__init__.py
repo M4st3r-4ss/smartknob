@@ -1,11 +1,19 @@
 """
-Turn a SmartKnob into a "deck" for controlling the computer it's plugged into.
+Let a SmartKnob control the computer it's plugged into (volume, brightness).
 
-Press the knob to cycle between controls (system volume, display brightness);
-rotate to adjust the active one. All of the logic lives on the host: the
-firmware just gets a SmartKnobConfig for the active control and reports
-rotation/presses back.
+The knob owns its menu, haptics and display; this agent follows it. The firmware
+sends plaintext lines over the same USB serial port it already logs to:
+
+    @SET <channel> <value>   knob was turned -> apply it here
+    @GET <channel>           knob opened a page -> answer with the OS value
+
+and the agent replies (also when something else changes a value):
+
+    @VAL <channel> <value>
 
 Run it with:
-    pipenv run python -m smartknob_deck
+    py -m smartknob_deck
+
+Install it to start hidden at login with:
+    py -m smartknob_deck.install_autostart
 """
