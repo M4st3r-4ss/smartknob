@@ -16,4 +16,12 @@ Run it with:
 
 Install it to start hidden at login with:
     py -m smartknob_deck.install_autostart
+
+The agent keeps the serial port open, and nothing else can share it. Uploads
+handle that themselves (scripts/deck_upload_hook.py stops the agent and starts it
+again), but anything else that wants the port - `pio device monitor` above all -
+needs it out of the way first:
+
+    py -m smartknob_deck --stop      free the port
+    py -m smartknob_deck --restart   put the agent back
 """

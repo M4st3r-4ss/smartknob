@@ -19,6 +19,7 @@ import time
 import serial
 import serial.tools.list_ports
 
+from . import instance
 from .controller import DeckAgent
 from .controls import (
     ALL_CONTROLS,
@@ -187,6 +188,14 @@ def main(argv=None):
     parser.add_argument('--self-test', action='store_true',
                         help='report what each control reads right now and exit '
                              '(no knob required)')
+    parser.add_argument('--stop', action='store_true',
+                        help='stop the running agent and exit, freeing the '
+                             'serial port so the firmware can be flashed')
+    parser.add_argument('--restart', action='store_true',
+                        help='stop the running agent and start a fresh hidden one')
+    parser.add_argument('--allow-multiple', action='store_true',
+                        help='skip the single-instance guard (two agents will '
+                             'fight over the port; for debugging only)')
     parser.add_argument('--log-file', nargs='?', const=default_log_path(),
                         help='also write logging to a file '
                              f'(default: {default_log_path()})')
@@ -204,9 +213,28 @@ def main(argv=None):
             print(f'{port.device} - {port.description}')
         return 0
 
+    if args.stop or args.restart:
+        stopped = instance.stop_running()
+        print(f'Stopped agent {", ".join(str(p) for p in stopped)}.' if stopped
+              else 'No agent was running.')
+        if not args.restart:
+            print('The serial port is free now.')
+            return 0
+        if instance.start_detached():
+            print('A fresh hidden agent is running.')
+            return 0
+        return 1
+
     keys = [key.strip() for key in args.controls.split(',') if key.strip()]
     if args.self_test:
         return _self_test(keys)
+
+    if not args.allow_multiple and not instance.acquire_single_instance():
+        # Two agents would take turns kicking each other off the port, which
+        # looks like a flaky knob rather than the duplicate launch it is.
+        logger.warning('Another SmartKnob agent is already running; leaving the '
+                       'port to it. Use --restart to replace it.')
+        return 0
 
     try:
         controls = build_controls(keys)

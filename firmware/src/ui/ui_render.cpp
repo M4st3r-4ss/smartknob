@@ -133,7 +133,10 @@ void drawMenu(TFT_eSprite& spr, const UiState& ui_state, uint32_t now_ms, float 
     (void)ui_state;
     backdrop(spr, now_ms, enter);
 
-    const float icon_y = CENTER_Y - 18;
+    // The selected glyph sits on the screen centre. The glow ring below is drawn
+    // about the centre too, so it now reads as a halo around the icon instead of
+    // a ring offset from it. The label pair hangs off icon_y so it follows.
+    const float icon_y = CENTER_Y;
     const int8_t nearest = (int8_t)lroundf(anim.carousel);
 
     for (int8_t i = 0; i < (int8_t)MENU_ITEM_COUNT; i++) {
@@ -160,9 +163,11 @@ void drawMenu(TFT_eSprite& spr, const UiState& ui_state, uint32_t now_ms, float 
         if (settle > 0.01f) {
             char name[24];
             upperCopy(name, sizeof(name), app.name);
-            trackedText(spr, name, CENTER_X, CENTER_Y + 42, &FreeSansBold9pt7b,
+            // Measured from the icon, not the screen: the gap under the glyph is
+            // what the eye reads, and the caption still clears the selection dots.
+            trackedText(spr, name, CENTER_X, (int16_t)(icon_y + 56), &FreeSansBold9pt7b,
                         mix(COLOR_BG, COLOR_TEXT, settle), 3);
-            centeredText(spr, app.caption, CENTER_X, CENTER_Y + 64, &FreeSans9pt7b,
+            centeredText(spr, app.caption, CENTER_X, (int16_t)(icon_y + 76), &FreeSans9pt7b,
                          mix(COLOR_BG, COLOR_TEXT_DIM, settle));
         }
     }

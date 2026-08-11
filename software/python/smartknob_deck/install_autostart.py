@@ -98,12 +98,19 @@ def install(extra_args):
     print(f'Launcher:  {vbs_path}')
     print(f'Startup:   {shortcut_path}')
     print()
+    # Installing twice would otherwise leave two agents taking turns kicking each
+    # other off the serial port, which reads as a flaky knob. Replace, don't add.
+    from . import instance
+    stopped = instance.stop_running()
+    if stopped:
+        print(f'Replacing the agent already running '
+              f'({", ".join(str(pid) for pid in stopped)}).')
     print('Starting it now so you don\'t have to log out and back in...')
     subprocess.Popen(['wscript', vbs_path], close_fds=True)
     print('Running. Turn the knob and the volume should follow.')
     print()
     print('Log: ' + os.path.join(app_dir(), 'smartknob_deck.log'))
-    print('Stop it with: taskkill /IM pythonw.exe')
+    print('Stop it with: py -m smartknob_deck --stop')
     print('Remove it with: py -m smartknob_deck.install_autostart --uninstall')
     return 0
 
@@ -121,7 +128,14 @@ def uninstall():
         print(f'Removed {path}')
     if not removed:
         print('Nothing to remove.')
-    print('Any running copy stays up until you stop it: taskkill /IM pythonw.exe')
+
+    # Uninstalling and then finding the knob still driving the volume until the
+    # next reboot would be baffling, so stop the running copy as well.
+    from . import instance
+    stopped = instance.stop_running()
+    if stopped:
+        print(f'Stopped the running agent '
+              f'({", ".join(str(pid) for pid in stopped)}).')
     return 0
 
 
