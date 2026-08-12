@@ -1012,9 +1012,11 @@ void drawPetEmote(TFT_eSprite& spr, PetMood mood, float face_y, float progress, 
             break;
         }
         case PetMood::SKITTISH:
+            // Sided the same way and for the same reason as the playful sparks:
+            // the middle dash of the shiver used to cross the title line.
             for (uint8_t i = 0; i < 3; i++) {
-                float side = i == 1 ? 0 : (i == 0 ? -1.0f : 1.0f);
-                float x = CENTER_X + side * (i == 1 ? 0 : 68);
+                float side = i == 1 ? 1.0f : -1.0f;
+                float x = CENTER_X + side * 68;
                 stroke(spr, x - 5, face_y - 40 - rise + i * 5,
                        x + 5, face_y - 46 - rise + i * 5, color);
             }
@@ -1037,10 +1039,15 @@ void drawPetEmote(TFT_eSprite& spr, PetMood mood, float face_y, float progress, 
             }
             break;
         case PetMood::PLAYFUL:
+            // All three sparks are thrown out to a side, alternating, rather than
+            // one of them going up the middle: the middle one rose straight
+            // through the mood title and blotted out a square of it. Alternating
+            // heights keep them reading as a scatter rather than a column.
             for (uint8_t i = 0; i < 3; i++) {
-                float side = i == 1 ? 0 : (i == 0 ? -1.0f : 1.0f);
-                float y = i == 1 ? face_y - 52 - rise : face_y - 34 - rise + i * 6;
-                drawPetSpark(spr, CENTER_X + side * 70, y, 8 - 3 * progress, color);
+                float side = i == 1 ? 1.0f : -1.0f;
+                float height = 40 - i * 14;
+                drawPetSpark(spr, CENTER_X + side * 70, face_y - height - rise,
+                             8 - 3 * progress, color);
             }
             break;
         case PetMood::SLEEPY:
