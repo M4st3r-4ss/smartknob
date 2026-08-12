@@ -175,25 +175,25 @@ static void iconCalibrate(TFT_eSprite& spr, int16_t cx, int16_t cy, float s, uin
 }
 
 static void iconPet(TFT_eSprite& spr, int16_t cx, int16_t cy, float s, uint16_t color, float value_unit) {
-    // Ears first, so the head outline draws over their bases.
-    for (int8_t side = -1; side <= 1; side += 2) {
-        float ex = cx + side * 0.52f * s;
-        spr.fillTriangle(ex - 0.20f * s, cy - 0.52f * s,
-            ex + 0.20f * s, cy - 0.44f * s,
-            ex + side * 0.10f * s, cy - 0.98f * s, color);
-    }
-    strokeArc(spr, cx, cy, 0.72f * s, 2, 0, 360, color);
+    // The page in miniature: the rim of the glass, and the pair of tall ovals
+    // inside it. No ears, no head, no mouth - the mouth only exists on the page
+    // while the pet is answering, and what makes this read as the pet at
+    // carousel size is the eyes, so they take all the weight the icon has.
+    spr.drawCircle(cx, cy, 0.92f * s, dim(color, 0.30f));
 
-    // The same two ovals as the page, shrunk: eyes are what makes it a face at
-    // carousel size. They narrow as the pet settles, matching a sleepy lid.
-    float rx = 0.17f * s;
-    float ry = rx * lerpf(1.7f, 0.7f, 1 - value_unit);
-    if (rx >= 1 && ry >= 1) {
-        for (int8_t side = -1; side <= 1; side += 2) {
-            spr.fillEllipse(cx + side * 0.28f * s, cy - 0.06f * s, (int32_t)rx, (int32_t)ry, color);
+    float rx = 0.15f * s;
+    float ry = rx * lerpf(2.0f, 2.6f, value_unit);
+    if (rx < 1 || ry < 1) {
+        return;
+    }
+    for (int8_t side = -1; side <= 1; side += 2) {
+        float ex = cx + side * 0.34f * s;
+        spr.fillEllipse((int32_t)ex, (int32_t)cy, (int32_t)rx, (int32_t)ry, color);
+        // The same catchlight as the face, once there is room to punch it out.
+        if (rx >= 3) {
+            spr.fillCircle((int32_t)(ex + rx * 0.30f), (int32_t)(cy - ry * 0.64f), 1, COLOR_BG);
         }
     }
-    strokeArc(spr, cx, cy + 0.18f * s, 0.26f * s, 2, 200, 340, dim(color, 0.7f));
 }
 
 void icon(TFT_eSprite& spr, AppIcon which, int16_t cx, int16_t cy, float size, uint16_t color, float value_unit, float anim_deg) {
