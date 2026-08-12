@@ -18,6 +18,7 @@ enum class AppIcon : uint8_t {
     CLICK,
     LED,
     CALIBRATE,
+    RESET,
     PET,
 };
 

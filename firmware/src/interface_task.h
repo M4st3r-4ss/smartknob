@@ -123,6 +123,8 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
          */
         void startStrainCalibration();
         void updateStrainCalibration();
+        /** Restores every settings row to its default, from the list itself. */
+        void resetSettings();
         int32_t calib_peak_ = 0;
         uint32_t calib_phase_ms_ = 0;
         /** Smallest peak-above-idle worth trusting, in raw HX711 counts. */

@@ -107,16 +107,59 @@ static void iconTimer(TFT_eSprite& spr, int16_t cx, int16_t cy, float s, uint16_
 }
 
 static void iconSettings(TFT_eSprite& spr, int16_t cx, int16_t cy, float s, uint16_t color, float anim_deg) {
-    for (uint8_t i = 0; i < 6; i++) {
-        float rad = (anim_deg + i * 60) * PI / 180;
-        float cos_a = cosf(rad);
-        float sin_a = sinf(rad);
-        stroke(spr, cx + 0.46f * s * cos_a, cy - 0.46f * s * sin_a,
-            cx + 0.86f * s * cos_a, cy - 0.86f * s * sin_a, color);
-        spr.fillCircle(cx + 0.80f * s * cos_a, cy - 0.80f * s * sin_a, 0.11f * s, color);
+    // A gear, rather than the spokes-with-dots wheel this used to be: that read
+    // as a sunburst at list size, because the spokes were hairlines and the dots
+    // that ended them were the heaviest thing in the glyph. A gear is instead a
+    // solid body with teeth cut into its outside, so the silhouette carries it.
+    const float r_body = 0.58f * s;
+    const float r_tip = 0.94f * s;
+    const float r_hub = 0.26f * s;
+
+    // Teeth first, then the body over their bases, so no seam shows where a
+    // tooth meets the rim.
+    for (uint8_t i = 0; i < 8; i++) {
+        float mid = (anim_deg + i * 45) * PI / 180;
+        // Tapered, so each one reads as a tooth instead of a peg.
+        const float base_half = 0.30f;
+        const float tip_half = 0.19f;
+        float bx0 = cx + r_body * cosf(mid - base_half);
+        float by0 = cy - r_body * sinf(mid - base_half);
+        float bx1 = cx + r_body * cosf(mid + base_half);
+        float by1 = cy - r_body * sinf(mid + base_half);
+        float tx0 = cx + r_tip * cosf(mid - tip_half);
+        float ty0 = cy - r_tip * sinf(mid - tip_half);
+        float tx1 = cx + r_tip * cosf(mid + tip_half);
+        float ty1 = cy - r_tip * sinf(mid + tip_half);
+        spr.fillTriangle(bx0, by0, bx1, by1, tx1, ty1, color);
+        spr.fillTriangle(bx0, by0, tx1, ty1, tx0, ty0, color);
     }
-    strokeArc(spr, cx, cy, 0.50f * s, 2, 0, 360, color);
-    spr.drawCircle(cx, cy, 0.22f * s, dim(color, 0.6f));
+
+    spr.fillCircle(cx, cy, r_body, color);
+    // Hub punched back out to the face, which is what keeps a solid disc of gold
+    // reading as a ring of metal. Skipped when there is no room to punch it.
+    if (r_hub >= 2) {
+        spr.fillCircle(cx, cy, r_hub, COLOR_BG);
+        spr.drawCircle(cx, cy, r_hub, dim(color, 0.55f));
+    }
+}
+
+static void iconReset(TFT_eSprite& spr, int16_t cx, int16_t cy, float s, uint16_t color) {
+    // Arrow curving back to where it started, with the gap at the top. Static,
+    // unlike the scroll icon's spinning arc: a reset happens once.
+    const float r = 0.74f * s;
+    strokeArc(spr, cx, cy, r, 2, 130, 410, color);
+
+    float end = 50 * PI / 180;
+    float hx = cx + r * cosf(end);
+    float hy = cy - r * sinf(end);
+    // Tangent at the open end, pointing the way the arc was travelling.
+    float apex = end + PI / 2;
+    float wing = 0.30f * s;
+    spr.fillTriangle(
+        hx + wing * cosf(apex), hy - wing * sinf(apex),
+        hx + wing * cosf(apex + 2.3f), hy - wing * sinf(apex + 2.3f),
+        hx + wing * cosf(apex - 2.3f), hy - wing * sinf(apex - 2.3f),
+        color);
 }
 
 static void iconStrength(TFT_eSprite& spr, int16_t cx, int16_t cy, float s, uint16_t color, float value_unit) {
@@ -243,6 +286,9 @@ void icon(TFT_eSprite& spr, AppIcon which, int16_t cx, int16_t cy, float size, u
             break;
         case AppIcon::CALIBRATE:
             iconCalibrate(spr, cx, cy, size, color, anim_deg);
+            break;
+        case AppIcon::RESET:
+            iconReset(spr, cx, cy, size, color);
             break;
         case AppIcon::PET:
             iconPet(spr, cx, cy, size, color, value_unit);

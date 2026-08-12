@@ -2,19 +2,21 @@
 
 // Persisted under short keys so they fit NVS's 15-character limit comfortably.
 static const char* const NVS_NAMESPACE = "sk_ui";
+// Keys are looked up by name, so dropping a row leaves the remaining ones
+// pointing at the same entries they were saved under. The two action rows never
+// touch NVS; their slots are placeholders to keep this array the same length.
 static const char* const NVS_KEYS[SETTING_COUNT] = {
-    "knob_str", "click_str", "press_thr", "min_bright", "led_ring", "led_bright", "unused",
+    "knob_str", "click_str", "min_bright", "led_ring", "led_bright", "unused", "unused2",
 };
 
 const SettingDescriptor SETTINGS[] = {
     {"STRENGTH", "Detent force", AppIcon::STRENGTH, SettingKind::PERCENT, 25, 200, 100, 3},
     {"CLICK", "Press feedback", AppIcon::CLICK, SettingKind::PERCENT, 25, 200, 100, 3},
-    // 100% is exactly the force recorded by strain calibration; lower is lighter.
-    {"PRESS FORCE", "Push threshold", AppIcon::PRESS, SettingKind::PERCENT, 40, 200, 100, 4},
     {"MIN BRIGHT", "Screen floor", AppIcon::BRIGHTNESS, SettingKind::PERCENT, 2, 100, 2, 3.6},
     {"LED RING", "Knob backlight", AppIcon::BULB, SettingKind::ONOFF, 0, 1, 1, 60},
     {"LED LEVEL", "Ring brightness", AppIcon::LED, SettingKind::PERCENT, 5, 100, 100, 3.6},
     {"CALIBRATE", "Strain sensor", AppIcon::CALIBRATE, SettingKind::ACTION, 0, 0, 0, 20},
+    {"RESET", "Restore defaults", AppIcon::RESET, SettingKind::ACTION, 0, 0, 0, 20},
 };
 
 const SettingDescriptor& settingAt(uint8_t index) {
@@ -45,6 +47,18 @@ void SettingsStore::set(SettingId id, int16_t value) {
         return;
     }
     values_[i] = constrain(value, d.min_value, d.max_value);
+}
+
+void SettingsStore::resetToDefaults() {
+    for (uint8_t i = 0; i < SETTING_COUNT; i++) {
+        if (SETTINGS[i].kind == SettingKind::ACTION) {
+            continue;
+        }
+        values_[i] = SETTINGS[i].default_value;
+    }
+    // Written straight through rather than left for the next commit(): a reset is
+    // deliberate, and the list it returns to has no confirming press of its own.
+    commit();
 }
 
 void SettingsStore::commit() {
@@ -83,10 +97,6 @@ float SettingsStore::clickForceScale() const {
 uint16_t SettingsStore::minBacklight() const {
     uint32_t scaled = (uint32_t)get(SettingId::MIN_BRIGHTNESS) * UINT16_MAX / 100;
     return (uint16_t)max(scaled, (uint32_t)1);
-}
-
-float SettingsStore::pressThreshold() const {
-    return get(SettingId::PRESS_FORCE) / 100.0f;
 }
 
 uint8_t SettingsStore::ledBrightness() const {

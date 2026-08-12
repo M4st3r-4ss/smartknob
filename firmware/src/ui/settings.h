@@ -9,11 +9,11 @@
 enum class SettingId : uint8_t {
     KNOB_STRENGTH,
     CLICK_FORCE,
-    PRESS_FORCE,
     MIN_BRIGHTNESS,
     LED_RING,
     LED_BRIGHTNESS,
     STRAIN_CALIBRATE,
+    RESET,
 };
 
 constexpr uint8_t SETTING_COUNT = 7;
@@ -36,6 +36,13 @@ struct SettingDescriptor {
     float step_degrees;
 };
 
+/**
+ * Press threshold as a fraction of the calibrated press force. This used to be a
+ * row of its own; it is now fixed at the lightest setting that row offered,
+ * which is the one worth having by default.
+ */
+constexpr float PRESS_THRESHOLD = 0.40f;
+
 extern const SettingDescriptor SETTINGS[];
 
 const SettingDescriptor& settingAt(uint8_t index);
@@ -57,6 +64,8 @@ class SettingsStore {
         void set(SettingId id, int16_t value);
         /** Persists any values changed since the last commit. */
         void commit();
+        /** Restores every value row to its default and persists immediately. */
+        void resetToDefaults();
 
         /** Position of the value within its range, 0-1, for arc drawing. */
         float unit(SettingId id) const;
@@ -68,8 +77,6 @@ class SettingsStore {
         float clickForceScale() const;
         /** Floor for the display backlight, in the 0-65535 backlight domain. */
         uint16_t minBacklight() const;
-        /** Press threshold, as a fraction of the calibrated press force (1 = as calibrated). */
-        float pressThreshold() const;
         /** LED ring brightness, 0-255, already zeroed when the ring is off. */
         uint8_t ledBrightness() const;
 

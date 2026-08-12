@@ -300,6 +300,8 @@ void InterfaceTask::openSettingEdit(uint8_t index) {
     if (d.kind == SettingKind::ACTION) {
         if ((SettingId)index == SettingId::STRAIN_CALIBRATE) {
             startStrainCalibration();
+        } else if ((SettingId)index == SettingId::RESET) {
+            resetSettings();
         }
         return;
     }
@@ -471,6 +473,19 @@ void InterfaceTask::reapplyCurrentConfig() {
     }
 }
 
+void InterfaceTask::resetSettings() {
+    settings_.resetToDefaults();
+    publishSettingValues();
+    ui_state_.settings_reset_nonce++;
+    publishUiState();
+
+    // Detent strength is folded into every locally-applied config, so the list
+    // the reset returns to has to be re-sent to pick up the default feel.
+    reapplyCurrentConfig();
+    motor_task_.playHaptic(true, settings_.clickForceScale());
+    log("Settings reset to defaults");
+}
+
 void InterfaceTask::startStrainCalibration() {
     #if SK_STRAIN
         if (!configuration_loaded_) {
@@ -504,7 +519,7 @@ void InterfaceTask::updateStrainCalibration() {
             configuration_value_.strain.idle_value = strain_reading_;
             snprintf(buf_, sizeof(buf_), "  idle_value=%d", configuration_value_.strain.idle_value);
             log(buf_);
-            log("Now push the knob down firmly, then let go");
+            log("Now tap the knob down firmly, then let go");
             strain_calibration_step_ = 2;
             calib_phase_ms_ = millis();
             calib_peak_ = strain_reading_;
@@ -999,9 +1014,9 @@ void InterfaceTask::updateHardware() {
             if (strain_calibration_step_ != 0) {
                 updateStrainCalibration();
             } else if (configuration_loaded_ && configuration_value_.has_strain) {
-                // The press-force setting scales the calibrated span, so 1.0 lands
-                // at a lighter or firmer push than the calibration itself used.
-                float span = configuration_value_.strain.press_delta * settings_.pressThreshold();
+                // The threshold is a fraction of the calibrated span, so a press
+                // registers well before the force the calibration itself recorded.
+                float span = configuration_value_.strain.press_delta * PRESS_THRESHOLD;
                 // TODO: calibrate and track (long term moving average) idle point (lower)
                 press_value_unit = lerp(strain_reading_, configuration_value_.strain.idle_value, configuration_value_.strain.idle_value + span, 0, 1);
 

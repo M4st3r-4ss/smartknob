@@ -41,6 +41,8 @@ struct UiState {
 
     /** Strain calibration phase, 0 when not calibrating (see InterfaceTask). */
     uint8_t calibration_step = 0;
+    /** Bumped when settings are restored to defaults, so the row can say so. */
+    uint8_t settings_reset_nonce = 0;
 
     /** Pet page: the creature's mood, as a PetMood. */
     uint8_t pet_mood = 0;

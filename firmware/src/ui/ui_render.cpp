@@ -16,6 +16,9 @@ namespace {
 constexpr uint32_t TRANSITION_MS = 340;
 constexpr uint32_t RIPPLE_MS = 420;
 
+/** How long the reset row reads "DONE" after it runs. */
+constexpr uint32_t RESET_FLASH_MS = 1400;
+
 /** Horizontal pitch between carousel items, in pixels. */
 constexpr float CAROUSEL_PITCH = 96;
 
@@ -32,6 +35,9 @@ struct Anim {
     uint8_t press_nonce = 0;
     uint32_t transition_start_ms = 0;
     uint32_t ripple_start_ms = 0;
+    /** Start of the "DONE" flash on the reset row, and the nonce that armed it. */
+    uint32_t settings_reset_ms = 0;
+    uint8_t settings_reset_nonce = 0;
 
     /** Smoothed 0-1 "is being patted", so the face eases in and out of a pat. */
     float pet_petting = 0;
@@ -84,6 +90,11 @@ float rippleProgress(uint32_t now_ms) {
         return -1;
     }
     return (float)elapsed / RIPPLE_MS;
+}
+
+/** True while the reset row should still be reporting that it ran. */
+bool resetFlashing(uint32_t now_ms) {
+    return anim.settings_reset_ms != 0 && now_ms - anim.settings_reset_ms < RESET_FLASH_MS;
 }
 
 /** Expanding gold hairline that acknowledges a press. */
@@ -452,9 +463,13 @@ void drawSettings(TFT_eSprite& spr, const UiState& ui_state, uint32_t now_ms, fl
 
         char value[12];
         formatSetting(d, ui_state.setting_values[i], value, sizeof(value));
-        if (d.kind == SettingKind::ACTION && ui_state.calibration_step > 0) {
+        // Both prompts are pinned to their own row: there is more than one action
+        // row now, so keying off SettingKind::ACTION would caption both of them.
+        if ((SettingId)i == SettingId::STRAIN_CALIBRATE && ui_state.calibration_step > 0) {
             // Guides the two-phase strain calibration without leaving the list.
-            strlcpy(value, ui_state.calibration_step == 1 ? "LET GO" : "PUSH", sizeof(value));
+            strlcpy(value, ui_state.calibration_step == 1 ? "LET GO" : "TAP", sizeof(value));
+        } else if ((SettingId)i == SettingId::RESET && resetFlashing(now_ms)) {
+            strlcpy(value, "DONE", sizeof(value));
         }
         int16_t value_width = trackedTextWidth(spr, value, &FreeSans9pt7b, 0);
         trackedText(spr, value, text_right - 8 - value_width / 2, y, &FreeSans9pt7b,
@@ -1194,6 +1209,10 @@ void render(TFT_eSprite& spr, const PB_SmartKnobState& state, const UiState& ui_
     if (ui_state.press_nonce != anim.press_nonce) {
         anim.press_nonce = ui_state.press_nonce;
         anim.ripple_start_ms = now_ms;
+    }
+    if (ui_state.settings_reset_nonce != anim.settings_reset_nonce) {
+        anim.settings_reset_nonce = ui_state.settings_reset_nonce;
+        anim.settings_reset_ms = now_ms;
     }
 
     if (ui_state.pet_reaction_nonce != anim.pet_reaction_nonce) {
