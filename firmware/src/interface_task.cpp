@@ -137,6 +137,17 @@ void InterfaceTask::run() {
             bool position_is_current = !latest_state_.has_config
                     || latest_state_.config.position_nonce == latest_config_.position_nonce;
 
+            if (position_is_current) {
+                // Turning the knob silences a ringing alarm, wherever we are and
+                // even on a page that ignores the dial. Checked here rather than
+                // in the per-mode branches below because the timer page locks the
+                // dial while the alarm runs, so a rotation reaches nothing else.
+                if (latest_state_.current_position != last_state_position_) {
+                    stopAlert();
+                }
+                last_state_position_ = latest_state_.current_position;
+            }
+
             if (!position_is_current) {
                 // Nothing to do until the motor catches up.
             } else if (ui_state_.mode == UiMode::MENU) {
@@ -282,6 +293,11 @@ void InterfaceTask::openSettingEdit(uint8_t index) {
 }
 
 void InterfaceTask::handlePress() {
+    // The alarm outlives the timer page, so a press anywhere silences it. On the
+    // timer page itself this is redundant with clearTimer(), which is fine: the
+    // press still does its own job below.
+    stopAlert();
+
     if (remote_controlled_) {
         // The host owns the screen; it sees press_nonce and decides what to do.
         // Still ripple, so the tap gets acknowledged locally either way.
@@ -356,6 +372,7 @@ void InterfaceTask::handlePress() {
 }
 
 void InterfaceTask::handleBack() {
+    stopAlert();
     if (ui_state_.mode == UiMode::MENU) {
         return;
     }
@@ -497,6 +514,9 @@ bool InterfaceTask::timerActive() const {
 }
 
 void InterfaceTask::clearTimer() {
+    // Dropping the countdown always silences its alarm: acknowledging, dialling a
+    // new duration and re-arming all come through here.
+    stopAlert();
     timer_deadline_ms_ = 0;
     timer_paused_s_ = 0;
     timer_last_shown_s_ = 0;
@@ -545,14 +565,44 @@ void InterfaceTask::toggleTimer() {
     timer_last_shown_s_ = seconds;
 }
 
-void InterfaceTask::tickAlert() {
-    if (alert_pulses_left_ == 0 || (int32_t)(millis() - alert_next_ms_) < 0) {
+void InterfaceTask::startAlert() {
+    alert_rings_left_ = ALERT_RINGS;
+    alert_ring_settled_ = true;
+    alert_next_ms_ = millis();
+}
+
+void InterfaceTask::stopAlert() {
+    if (alert_rings_left_ == 0 && alert_ring_settled_) {
         return;
     }
-    // Alternating kick and release reads as a distinct double-buzz.
-    motor_task_.playHaptic(alert_pulses_left_ % 2 == 0, settings_.clickForceScale());
-    alert_pulses_left_--;
-    alert_next_ms_ = millis() + 100;
+    alert_rings_left_ = 0;
+    if (!alert_ring_settled_) {
+        // A kick is still out. Release it, or the motor holds that torque until
+        // something else happens to send a haptic.
+        motor_task_.playHaptic(false, settings_.clickForceScale());
+        alert_ring_settled_ = true;
+    }
+}
+
+void InterfaceTask::tickAlert() {
+    if (alert_rings_left_ == 0 || (int32_t)(millis() - alert_next_ms_) < 0) {
+        return;
+    }
+
+    if (alert_ring_settled_) {
+        // Kick: the ring itself.
+        motor_task_.playHaptic(true, settings_.clickForceScale());
+        alert_ring_settled_ = false;
+        alert_next_ms_ = millis() + ALERT_KICK_MS;
+        return;
+    }
+
+    // Release, then wait out the gap. The gap is what makes ten rings read as
+    // ten separate rings instead of one long buzz.
+    motor_task_.playHaptic(false, settings_.clickForceScale());
+    alert_ring_settled_ = true;
+    alert_rings_left_--;
+    alert_next_ms_ = millis() + ALERT_GAP_MS;
 }
 
 void InterfaceTask::tickTimer() {
@@ -576,9 +626,7 @@ void InterfaceTask::tickTimer() {
         ui_state_.timer_elapsed = true;
         publishUiState();
         log("Timer finished");
-        // Pulsed rather than blocking, so serial and press detection keep running.
-        alert_pulses_left_ = 6;
-        alert_next_ms_ = now;
+        startAlert();
         return;
     }
 
@@ -823,5 +871,9 @@ void InterfaceTask::applyConfig(PB_SmartKnobConfig& config, bool from_remote) {
     }
     remote_controlled_ = from_remote;
     latest_config_ = config;
+    // A config move is our own doing, not the user's. Re-seat the rotation
+    // baseline with it so the jump it causes is not read as a knob turn - that
+    // would silence the alarm the moment the timer page re-seats the dial.
+    last_state_position_ = config.position;
     motor_task_.setConfig(config);
 }

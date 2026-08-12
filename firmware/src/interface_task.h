@@ -139,10 +139,31 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
         bool timerActive() const;
         /** Drops any countdown, running, paused or finished. */
         void clearTimer();
-        /** Non-blocking haptic alert pulses, used when a countdown ends. */
+        /**
+         * Non-blocking haptic alarm for a finished countdown: a run of distinct
+         * rings rather than one buzz, so it reads as an alarm from across a room.
+         * Driven from the interface loop, so serial and press detection keep
+         * running throughout.
+         */
+        void startAlert();
         void tickAlert();
-        uint8_t alert_pulses_left_ = 0;
+        /** Silences the alarm early. Any deliberate knob action calls this. */
+        void stopAlert();
+        /** Rings still owed, counting the one in progress. */
+        uint8_t alert_rings_left_ = 0;
+        /** False while a ring's kick is out and its release is still owed. */
+        bool alert_ring_settled_ = true;
         uint32_t alert_next_ms_ = 0;
+        /** Rings for one alarm, and the shape of a single ring. */
+        static const uint8_t ALERT_RINGS = 10;
+        static const uint32_t ALERT_KICK_MS = 90;
+        static const uint32_t ALERT_GAP_MS = 400;
+
+        /**
+         * Last position seen from the motor, used to spot a rotation even on
+         * pages that otherwise ignore the dial.
+         */
+        int32_t last_state_position_ = 0;
 
         /** Queues the open app's value for the host, honouring the throttle. */
         void noteHostValue();

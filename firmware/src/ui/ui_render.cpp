@@ -157,8 +157,9 @@ void drawMenu(TFT_eSprite& spr, const UiState& ui_state, uint32_t now_ms, float 
     }
 
     // Name of the nearest app, fading out while the row is mid-slide. No caption
-    // under it: the menu reads cleaner as icon plus name. app.caption still does
-    // its job on the app page itself.
+    // under it: the menu reads cleaner as icon plus name. Nothing draws
+    // app.caption any more, but the descriptors keep it as documentation and as
+    // a one-line way to put the subtitles back.
     if (nearest >= 0 && nearest < (int8_t)MENU_ITEM_COUNT) {
         const AppDescriptor& app = APPS[MENU_ITEMS[nearest]];
         float settle = clamp01(1 - fabsf(anim.carousel - nearest) * 2.4f) * enter;
@@ -246,13 +247,19 @@ void drawApp(TFT_eSprite& spr, const PB_SmartKnobState& state, const UiState& ui
     backdrop(spr, now_ms, enter);
     drawValueArc(spr, state, anim.value_unit, enter);
 
+    // Name, glyph and value share the face evenly now that the subtitle is gone:
+    // the trio is centred in the ring instead of being packed into its top half.
+    // The name also clears the arc better here - at the old height the widest
+    // one ("BRIGHTNESS") reached almost exactly as far as the arc's inner edge.
     char name[24];
     upperCopy(name, sizeof(name), app.name);
-    trackedText(spr, name, CENTER_X, CENTER_Y - 78, &FreeSans9pt7b,
+    trackedText(spr, name, CENTER_X, CENTER_Y - 66, &FreeSans9pt7b,
                 mix(COLOR_BG, COLOR_GOLD, enter), 3);
 
+    // The glyph starts where the carousel left it, which is the centre now that
+    // the menu icon sits there, and rises into place as the page settles.
     float icon_size = lerpf(30, 15, easeOutCubic(enter));
-    float icon_y = lerpf(CENTER_Y - 18, CENTER_Y - 50, easeOutCubic(enter));
+    float icon_y = lerpf(CENTER_Y, CENTER_Y - 30, easeOutCubic(enter));
     icon(spr, app.icon, CENTER_X, (int16_t)icon_y, icon_size,
          dim(COLOR_GOLD, 0.55f + 0.45f * enter), anim.value_unit, now_ms * 0.12f);
 
@@ -268,34 +275,44 @@ void drawApp(TFT_eSprite& spr, const PB_SmartKnobState& state, const UiState& ui
         formatValue(app, state, value, sizeof(value), unit, sizeof(unit));
     }
 
+    // No fixed subtitle on the page. The timer keeps its line because that one is
+    // live state, not decoration: without it a paused countdown looks exactly
+    // like a running one, since both just show MM:SS.
+    const char* status = nullptr;
+    if (app.kind == AppKind::TIMER) {
+        if (ui_state.timer_elapsed) {
+            status = "Time up";
+        } else if (ui_state.timer_running) {
+            status = "Press to pause";
+        } else if (ui_state.timer_remaining_s > 0) {
+            status = "Paused";
+        }
+    }
+
+    // One element more to fit when the timer is live, so the value moves up to
+    // make room rather than crowding the status line into the hold indicator.
+    int16_t value_y = CENTER_Y + (status != nullptr ? 8 : 20);
+
     bool wordy = app.value_style == ValueStyle::ONOFF || app.value_style == ValueStyle::STEPS;
     if (wordy) {
-        trackedText(spr, value, CENTER_X, CENTER_Y + 14, &FreeSansBold12pt7b,
+        trackedText(spr, value, CENTER_X, value_y, &FreeSansBold12pt7b,
                     mix(COLOR_BG, COLOR_TEXT, enter), 4);
     } else {
         spr.setTextDatum(CC_DATUM);
         spr.setFreeFont(&Roboto_Light_60);
         spr.setTextColor(mix(COLOR_BG, COLOR_TEXT, enter));
-        spr.drawString(value, CENTER_X, CENTER_Y + 10, 1);
+        spr.drawString(value, CENTER_X, value_y, 1);
         if (unit[0] != '\0') {
             int16_t half = spr.textWidth(value, 1) / 2;
-            centeredText(spr, unit, CENTER_X + half + 14, CENTER_Y + 24, &FreeSans9pt7b,
+            centeredText(spr, unit, CENTER_X + half + 14, value_y + 14, &FreeSans9pt7b,
                          mix(COLOR_BG, COLOR_GOLD_SOFT, enter));
         }
     }
 
-    const char* caption = app.caption;
-    if (app.kind == AppKind::TIMER) {
-        if (ui_state.timer_elapsed) {
-            caption = "Time up";
-        } else if (ui_state.timer_running) {
-            caption = "Press to pause";
-        } else if (ui_state.timer_remaining_s > 0) {
-            caption = "Paused";
-        }
+    if (status != nullptr) {
+        centeredText(spr, status, CENTER_X, CENTER_Y + 56, &FreeSans9pt7b,
+                     mix(COLOR_BG, COLOR_TEXT_DIM, enter * 0.9f));
     }
-    centeredText(spr, caption, CENTER_X, CENTER_Y + 52, &FreeSans9pt7b,
-                 mix(COLOR_BG, COLOR_TEXT_DIM, enter * 0.9f));
 
     // A finished countdown pulses the bezel until the press that clears it.
     if (ui_state.timer_elapsed) {
@@ -377,13 +394,21 @@ void drawSettings(TFT_eSprite& spr, const UiState& ui_state, uint32_t now_ms, fl
 
     const float chord_radius = BEZEL_RADIUS - 8;
 
+    // Rows used to be cut off at a fixed distance, which left the outermost one
+    // sitting on top of the SETTINGS header. They now fade out over the last
+    // stretch and are gone before they reach it, which also removes the pop as
+    // rows appear and disappear during a scroll.
+    constexpr float ROW_FADE_START = ROW_PITCH;
+    constexpr float ROW_CUTOFF = 78;
+
     for (uint8_t i = 0; i < SETTING_COUNT; i++) {
         float dy = (i - anim.list) * ROW_PITCH;
-        if (fabsf(dy) > 96) {
+        float edge = clamp01((ROW_CUTOFF - fabsf(dy)) / (ROW_CUTOFF - ROW_FADE_START));
+        if (edge <= 0.01f) {
             continue;
         }
         float focus = clamp01(1 - fabsf(dy) / ROW_PITCH);
-        float fade = (0.30f + 0.70f * focus) * enter;
+        float fade = (0.30f + 0.70f * focus) * enter * edge;
         int16_t y = (int16_t)(CENTER_Y + dy);
 
         // Half-width of the face at this row, so the hairlines follow the glass.
@@ -451,28 +476,30 @@ void drawSettingEdit(TFT_eSprite& spr, const PB_SmartKnobState& state, const UiS
     backdrop(spr, now_ms, enter);
     drawValueArc(spr, state, anim.value_unit, enter);
 
+    // Same three-element spacing as an app page, so stepping from one to the
+    // other doesn't shift the furniture around.
     char name[20];
     upperCopy(name, sizeof(name), d.name);
-    trackedText(spr, name, CENTER_X, CENTER_Y - 78, &FreeSans9pt7b,
+    trackedText(spr, name, CENTER_X, CENTER_Y - 66, &FreeSans9pt7b,
                 mix(COLOR_BG, COLOR_GOLD, enter), 3);
 
-    icon(spr, d.icon, CENTER_X, CENTER_Y - 46, 15,
+    icon(spr, d.icon, CENTER_X, CENTER_Y - 30, 15,
          dim(COLOR_GOLD, 0.55f + 0.45f * enter), anim.value_unit, now_ms * 0.12f);
 
     char value[12];
     formatSetting(d, ui_state.setting_values[ui_state.setting_index], value, sizeof(value));
     if (d.kind == SettingKind::ONOFF) {
-        trackedText(spr, value, CENTER_X, CENTER_Y + 14, &FreeSansBold12pt7b,
+        trackedText(spr, value, CENTER_X, CENTER_Y + 20, &FreeSansBold12pt7b,
                     mix(COLOR_BG, COLOR_TEXT, enter), 4);
     } else {
         spr.setTextDatum(CC_DATUM);
         spr.setFreeFont(&Roboto_Light_60);
         spr.setTextColor(mix(COLOR_BG, COLOR_TEXT, enter));
-        spr.drawString(value, CENTER_X, CENTER_Y + 10, 1);
+        spr.drawString(value, CENTER_X, CENTER_Y + 20, 1);
     }
 
-    centeredText(spr, d.caption, CENTER_X, CENTER_Y + 52, &FreeSans9pt7b,
-                 mix(COLOR_BG, COLOR_TEXT_DIM, enter * 0.9f));
+    // Subtitle removed here too: the row's own name above the value says enough.
+    // d.caption is now unread, like app.caption, and kept for the same reason.
 
     drawRipple(spr, rippleProgress(now_ms));
     drawHoldIndicator(spr, ui_state.hold_progress);
