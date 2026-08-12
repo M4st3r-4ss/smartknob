@@ -178,8 +178,14 @@ static void iconPet(TFT_eSprite& spr, int16_t cx, int16_t cy, float s, uint16_t 
     // The page in miniature: the rim of the glass, and the pair of tall ovals
     // inside it. No ears, no head, no mouth - the mouth only exists on the page
     // while the pet is answering, and what makes this read as the pet at
-    // carousel size is the eyes, so they take all the weight the icon has.
-    spr.drawCircle(cx, cy, 0.92f * s, dim(color, 0.30f));
+    // carousel size is the eyes, so they take most of the weight the icon has.
+    //
+    // The rim is the icon's outline, so it is drawn at full colour and two to
+    // three pixels thick, not as a hairline: a 1px ring at a third brightness
+    // washed out into the bezel at carousel size. strokeArc walks the ring as
+    // radial segments, which keeps it solid - concentric drawCircle calls leave
+    // gaps between neighbouring Bresenham radii.
+    strokeArc(spr, cx, cy, 0.90f * s, max(2.0f, 0.10f * s), -180, 180, color);
 
     float rx = 0.15f * s;
     float ry = rx * lerpf(2.0f, 2.6f, value_unit);
