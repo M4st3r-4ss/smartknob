@@ -18,6 +18,7 @@ enum class AppIcon : uint8_t {
     CLICK,
     LED,
     CALIBRATE,
+    PET,
 };
 
 /** How the app's position is presented on its page. */
@@ -36,6 +37,7 @@ enum class PressAction : uint8_t {
     CYCLE,       // advance one position, wrapping at max
     MUTE,        // jump to min, remembering the previous position
     START_STOP,  // timer: start the countdown, or pause/resume a running one
+    PET_MOOD,    // pet: move the creature on to its next mood
 };
 
 /** Which OS-side control, if any, mirrors this app's value over the cable. */
@@ -50,6 +52,7 @@ enum class AppKind : uint8_t {
     VALUE,     // position maps straight to a value
     TIMER,     // position sets a duration that then counts down
     SETTINGS,  // opens the settings list instead of a value page
+    PET,       // rotation pats a creature; the page has no value at all
 };
 
 struct AppDescriptor {
@@ -70,6 +73,7 @@ enum : uint8_t {
     APP_VOLUME = 0,
     APP_BRIGHTNESS,
     APP_TIMER,
+    APP_PET,
     APP_SETTINGS,
     APP_LIGHT,
     APP_FAN,

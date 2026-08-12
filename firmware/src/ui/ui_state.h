@@ -41,4 +41,19 @@ struct UiState {
 
     /** Strain calibration phase, 0 when not calibrating (see InterfaceTask). */
     uint8_t calibration_step = 0;
+
+    /** Pet page: the creature's mood, as a PetMood. */
+    uint8_t pet_mood = 0;
+    /** 0-1 attention banked from patting, which is what moves the mood along. */
+    float pet_charge = 0;
+    /** 0-1 agitation caused by hurried or overly forceful strokes. */
+    float pet_agitation = 0;
+    /** Smoothed patting speed in degrees per second. */
+    float pet_speed = 0;
+    /** True while pats are still arriving, so the face can react mid-stroke. */
+    bool pet_petting = false;
+    /** Bumped when a pat ends, so the renderer plays the after-pat emote. */
+    uint8_t pet_reaction_nonce = 0;
+    /** Bumped on every mood change, so the new face can animate in. */
+    uint8_t pet_mood_nonce = 0;
 };

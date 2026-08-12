@@ -6,37 +6,8 @@
 
 namespace ui {
 
-/** Stroked arc around an arbitrary centre, drawn as radial spokes. */
-static void strokeArc(TFT_eSprite& spr, float cx, float cy, float radius, float thickness, float start_deg, float end_deg, uint16_t color) {
-    if (radius <= 0) {
-        return;
-    }
-    float step = 51.6f / max(1.0f, radius);
-    int32_t steps = (int32_t)(fabsf(end_deg - start_deg) / step) + 1;
-    float direction = end_deg > start_deg ? step : -step;
-    float inner = max(0.0f, radius - thickness / 2);
-    float outer = radius + thickness / 2;
-    for (int32_t i = 0; i <= steps; i++) {
-        float rad = (start_deg + direction * i) * PI / 180;
-        float cos_a = cosf(rad);
-        float sin_a = sinf(rad);
-        spr.drawLine(cx + inner * cos_a, cy - inner * sin_a, cx + outer * cos_a, cy - outer * sin_a, color);
-    }
-}
-
-/** Two-pixel-wide line, thickened perpendicular to its direction. */
-static void stroke(TFT_eSprite& spr, float x0, float y0, float x1, float y1, uint16_t color) {
-    float dx = x1 - x0;
-    float dy = y1 - y0;
-    float len = sqrtf(dx * dx + dy * dy);
-    spr.drawLine(x0, y0, x1, y1, color);
-    if (len < 0.001f) {
-        return;
-    }
-    float nx = -dy / len;
-    float ny = dx / len;
-    spr.drawLine(x0 + nx, y0 + ny, x1 + nx, y1 + ny, color);
-}
+// strokeArc() and stroke() live in ui_theme now: the pet face needs the same two
+// primitives, and both are in namespace ui, so the calls below are unchanged.
 
 static void iconVolume(TFT_eSprite& spr, int16_t cx, int16_t cy, float s, uint16_t color, float value_unit) {
     float body_left = cx - 0.72f * s;
@@ -203,6 +174,28 @@ static void iconCalibrate(TFT_eSprite& spr, int16_t cx, int16_t cy, float s, uin
     spr.fillCircle(cx, cy, 0.11f * s, color);
 }
 
+static void iconPet(TFT_eSprite& spr, int16_t cx, int16_t cy, float s, uint16_t color, float value_unit) {
+    // Ears first, so the head outline draws over their bases.
+    for (int8_t side = -1; side <= 1; side += 2) {
+        float ex = cx + side * 0.52f * s;
+        spr.fillTriangle(ex - 0.20f * s, cy - 0.52f * s,
+            ex + 0.20f * s, cy - 0.44f * s,
+            ex + side * 0.10f * s, cy - 0.98f * s, color);
+    }
+    strokeArc(spr, cx, cy, 0.72f * s, 2, 0, 360, color);
+
+    // The same two ovals as the page, shrunk: eyes are what makes it a face at
+    // carousel size. They narrow as the pet settles, matching a sleepy lid.
+    float rx = 0.17f * s;
+    float ry = rx * lerpf(1.7f, 0.7f, 1 - value_unit);
+    if (rx >= 1 && ry >= 1) {
+        for (int8_t side = -1; side <= 1; side += 2) {
+            spr.fillEllipse(cx + side * 0.28f * s, cy - 0.06f * s, (int32_t)rx, (int32_t)ry, color);
+        }
+    }
+    strokeArc(spr, cx, cy + 0.18f * s, 0.26f * s, 2, 200, 340, dim(color, 0.7f));
+}
+
 void icon(TFT_eSprite& spr, AppIcon which, int16_t cx, int16_t cy, float size, uint16_t color, float value_unit, float anim_deg) {
     if (size < 3) {
         return;
@@ -244,6 +237,9 @@ void icon(TFT_eSprite& spr, AppIcon which, int16_t cx, int16_t cy, float size, u
             break;
         case AppIcon::CALIBRATE:
             iconCalibrate(spr, cx, cy, size, color, anim_deg);
+            break;
+        case AppIcon::PET:
+            iconPet(spr, cx, cy, size, color, value_unit);
             break;
     }
 }

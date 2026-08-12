@@ -142,8 +142,8 @@ void InterfaceTask::run() {
                 // even on a page that ignores the dial. Checked here rather than
                 // in the per-mode branches below because the timer page locks the
                 // dial while the alarm runs, so a rotation reaches nothing else.
-                if (latest_state_.current_position != last_state_position_) {
-                    stopAlert();
+                if (latest_state_.current_position != last_state_position_ && pattern_cancel_on_rotation_) {
+                    stopPattern();
                 }
                 last_state_position_ = latest_state_.current_position;
             }
@@ -160,10 +160,15 @@ void InterfaceTask::run() {
                 bool dial_locked = currentApp().kind == AppKind::TIMER && timerActive();
                 int32_t previous = app_position_[ui_state_.app_index];
                 if (!dial_locked && latest_state_.current_position != previous) {
+                    int32_t delta = latest_state_.current_position - previous;
                     app_position_[ui_state_.app_index] = latest_state_.current_position;
-                    // Only a paused countdown can still be holding a remainder
-                    // here, and dialling a new duration replaces it.
-                    if (currentApp().kind == AppKind::TIMER) {
+                    if (currentApp().kind == AppKind::PET) {
+                        // Rotation is a pat here rather than a value: which way
+                        // the knob went does not matter, only how far.
+                        notePetStroke(delta < 0 ? -delta : delta);
+                    } else if (currentApp().kind == AppKind::TIMER) {
+                        // Only a paused countdown can still be holding a
+                        // remainder here, and dialling a new duration replaces it.
                         clearTimer();
                     }
                     noteHostValue();
@@ -184,7 +189,9 @@ void InterfaceTask::run() {
             }
         }
 
+        tickPattern();
         tickTimer();
+        tickPet();
         flushHostValue();
 
         current_protocol_->loop();
@@ -244,12 +251,27 @@ void InterfaceTask::openApp(uint8_t index) {
         // Only a real page change animates; in-app value changes must not restart it.
         ui_state_.mode_nonce++;
     }
-    publishUiState();
 
-    PB_SmartKnobConfig config = app.config;
-    config.position = app_position_[index];
-    config.sub_position_unit = 0;
-    applyLocalConfig(config);
+    if (app.kind == AppKind::PET) {
+        // The mood carries over between visits, but nothing else does: no pat is
+        // in progress, and the doze-off clock starts from this moment rather than
+        // from whenever the page was last closed.
+        ui_state_.pet_mood = (uint8_t)pet_mood_;
+        ui_state_.pet_charge = pet_charge_;
+        ui_state_.pet_agitation = pet_agitation_;
+        ui_state_.pet_petting = false;
+        pet_pat_open_ = false;
+        pet_pat_degrees_ = 0;
+        pet_speed_ = 0;
+        pet_grain_deg_ = 0;
+        pet_mood_pending_ = false;
+        pet_last_stroke_ms_ = millis();
+        pet_tick_ms_ = millis();
+        pet_tremble_ms_ = millis();
+    }
+
+    publishUiState();
+    applyLocalConfig(currentAppConfig());
 
     if (entering) {
         // Open on whatever the OS currently has, not on a stale local value.
@@ -296,7 +318,7 @@ void InterfaceTask::handlePress() {
     // The alarm outlives the timer page, so a press anywhere silences it. On the
     // timer page itself this is redundant with clearTimer(), which is fine: the
     // press still does its own job below.
-    stopAlert();
+    stopPattern();
 
     if (remote_controlled_) {
         // The host owns the screen; it sees press_nonce and decides what to do.
@@ -357,6 +379,11 @@ void InterfaceTask::handlePress() {
         case PressAction::START_STOP:
             toggleTimer();
             break;
+        case PressAction::PET_MOOD:
+            // Nudges the pet on to its next mood, so every mood and every pair of
+            // feedbacks can be tried without waiting for one to be earned.
+            setPetMood((PetMood)(((uint8_t)pet_mood_ + 1) % PET_MOOD_COUNT));
+            break;
         case PressAction::NONE:
             break;
     }
@@ -372,7 +399,7 @@ void InterfaceTask::handlePress() {
 }
 
 void InterfaceTask::handleBack() {
-    stopAlert();
+    stopPattern();
     if (ui_state_.mode == UiMode::MENU) {
         return;
     }
@@ -399,6 +426,24 @@ const AppDescriptor& InterfaceTask::currentApp() const {
     return APPS[ui_state_.app_index < APP_COUNT ? ui_state_.app_index : 0];
 }
 
+PB_SmartKnobConfig InterfaceTask::currentAppConfig() {
+    uint8_t index = ui_state_.app_index < APP_COUNT ? ui_state_.app_index : 0;
+    const AppDescriptor& app = APPS[index];
+
+    if (app.kind == AppKind::PET) {
+        // Feedback 1 lives here: each mood has its own detent width and strength,
+        // so how the knob pushes back is the mood. petConfig() re-labels wherever
+        // the knob is now as position 0, so the stroke baseline resets with it.
+        app_position_[index] = 0;
+        return petConfig(pet_mood_);
+    }
+
+    PB_SmartKnobConfig config = app.config;
+    config.position = app_position_[index];
+    config.sub_position_unit = 0;
+    return config;
+}
+
 void InterfaceTask::publishSettingValues() {
     for (uint8_t i = 0; i < SETTING_COUNT; i++) {
         ui_state_.setting_values[i] = settings_.get((SettingId)i);
@@ -418,13 +463,9 @@ void InterfaceTask::reapplyCurrentConfig() {
             applyLocalConfig(settingEditConfig(id, settings_.get(id)));
             break;
         }
-        case UiMode::APP: {
-            PB_SmartKnobConfig config = currentApp().config;
-            config.position = app_position_[ui_state_.app_index];
-            config.sub_position_unit = 0;
-            applyLocalConfig(config);
+        case UiMode::APP:
+            applyLocalConfig(currentAppConfig());
             break;
-        }
         case UiMode::REMOTE:
             break;
     }
@@ -516,7 +557,7 @@ bool InterfaceTask::timerActive() const {
 void InterfaceTask::clearTimer() {
     // Dropping the countdown always silences its alarm: acknowledging, dialling a
     // new duration and re-arming all come through here.
-    stopAlert();
+    stopPattern();
     timer_deadline_ms_ = 0;
     timer_paused_s_ = 0;
     timer_last_shown_s_ = 0;
@@ -565,48 +606,63 @@ void InterfaceTask::toggleTimer() {
     timer_last_shown_s_ = seconds;
 }
 
-void InterfaceTask::startAlert() {
-    alert_rings_left_ = ALERT_RINGS;
-    alert_ring_settled_ = true;
-    alert_next_ms_ = millis();
-}
-
-void InterfaceTask::stopAlert() {
-    if (alert_rings_left_ == 0 && alert_ring_settled_) {
+void InterfaceTask::startPattern(uint8_t beats, uint32_t kick_ms, uint32_t gap_ms, float strength, bool cancel_on_rotation) {
+    if (beats == 0) {
         return;
     }
-    alert_rings_left_ = 0;
-    if (!alert_ring_settled_) {
+    // Whatever was playing is dropped rather than queued behind this one: there
+    // is one motor, and the newest feedback is the one the user is waiting for.
+    stopPattern();
+    pattern_beats_left_ = beats;
+    pattern_settled_ = true;
+    pattern_kick_ms_ = kick_ms;
+    pattern_gap_ms_ = gap_ms;
+    pattern_strength_ = strength > 0 ? strength : 1;
+    pattern_cancel_on_rotation_ = cancel_on_rotation;
+    pattern_next_ms_ = millis();
+}
+
+void InterfaceTask::startAlert() {
+    startPattern(ALERT_RINGS, ALERT_KICK_MS, ALERT_GAP_MS, 1, true);
+}
+
+void InterfaceTask::stopPattern() {
+    if (pattern_beats_left_ == 0 && pattern_settled_) {
+        return;
+    }
+    pattern_beats_left_ = 0;
+    if (!pattern_settled_) {
         // A kick is still out. Release it, or the motor holds that torque until
         // something else happens to send a haptic.
-        motor_task_.playHaptic(false, settings_.clickForceScale());
-        alert_ring_settled_ = true;
+        motor_task_.playHaptic(false, pattern_strength_ * settings_.clickForceScale());
+        pattern_settled_ = true;
     }
 }
 
-void InterfaceTask::tickAlert() {
-    if (alert_rings_left_ == 0 || (int32_t)(millis() - alert_next_ms_) < 0) {
+void InterfaceTask::tickPattern() {
+    if (pattern_beats_left_ == 0 || (int32_t)(millis() - pattern_next_ms_) < 0) {
         return;
     }
 
-    if (alert_ring_settled_) {
-        // Kick: the ring itself.
-        motor_task_.playHaptic(true, settings_.clickForceScale());
-        alert_ring_settled_ = false;
-        alert_next_ms_ = millis() + ALERT_KICK_MS;
+    float scale = pattern_strength_ * settings_.clickForceScale();
+
+    if (pattern_settled_) {
+        // Kick: the beat itself.
+        motor_task_.playHaptic(true, scale);
+        pattern_settled_ = false;
+        pattern_next_ms_ = millis() + pattern_kick_ms_;
         return;
     }
 
-    // Release, then wait out the gap. The gap is what makes ten rings read as
-    // ten separate rings instead of one long buzz.
-    motor_task_.playHaptic(false, settings_.clickForceScale());
-    alert_ring_settled_ = true;
-    alert_rings_left_--;
-    alert_next_ms_ = millis() + ALERT_GAP_MS;
+    // Release, then wait out the gap. The gap is what makes a run of beats read
+    // as separate beats instead of one long buzz.
+    motor_task_.playHaptic(false, scale);
+    pattern_settled_ = true;
+    pattern_beats_left_--;
+    pattern_next_ms_ = millis() + pattern_gap_ms_;
 }
 
 void InterfaceTask::tickTimer() {
-    tickAlert();
 
     if (timer_deadline_ms_ == 0) {
         return;
@@ -635,6 +691,197 @@ void InterfaceTask::tickTimer() {
         ui_state_.timer_remaining_s = remaining_s;
         publishUiState();
     }
+}
+
+void InterfaceTask::notePetStroke(int32_t detents) {
+    if (detents <= 0) {
+        return;
+    }
+
+    // A hand back on the knob cuts off the previous reaction: the pet is being
+    // touched again, so its answer to the last pat is stale. This is also why the
+    // reaction pattern does not cancel itself on rotation - its own beats move
+    // the knob, and only a real pat should stop it.
+    stopPattern();
+
+    uint32_t now = millis();
+    const PetTextureDescriptor& t = petTextureFor(pet_mood_);
+    // Detents are the mood's own grain, so they are converted to degrees before
+    // anything is banked. Otherwise a coarse coat would earn nine times as much
+    // affection per turn as a fine one, purely because its steps are wider.
+    float degrees_turned = detents * t.detent_width_degrees;
+
+    if (!pet_pat_open_) {
+        pet_pat_open_ = true;
+        pet_pat_degrees_ = 0;
+        pet_grain_deg_ = 0;
+        pet_speed_ = 0;
+        pet_tremble_ms_ = now;
+        ui_state_.pet_petting = true;
+    } else {
+        // Speed over the gap since the last report, smoothed hard: the motor
+        // publishes every 5ms, so a raw figure is far too jumpy to judge with.
+        uint32_t gap_ms = now - pet_last_stroke_ms_;
+        if (gap_ms > 0 && gap_ms < 400) {
+            float instant = degrees_turned * 1000.0f / gap_ms;
+            pet_speed_ = pet_speed_ + (instant - pet_speed_) * 0.25f;
+        }
+    }
+
+    pet_last_stroke_ms_ = now;
+    pet_tick_ms_ = now;
+
+    // Capped rather than summed without bound: past the over-pet mark the exact
+    // total stops mattering.
+    pet_pat_degrees_ = min(pet_pat_degrees_ + degrees_turned, PET_OVERPET_DEG + 1);
+    pet_grain_deg_ += degrees_turned;
+
+    // Gentle patting banks affection; frantic patting banks agitation instead of
+    // it. The crossfade is what makes how you pat matter as much as how much:
+    // the same rotation is a caress or a shove depending on how fast it went.
+    float roughness = CLAMP((pet_speed_ - PET_ROUGH_DEG_PER_S) / PET_ROUGH_DEG_PER_S,
+                            (float)0, (float)1);
+    pet_charge_ = CLAMP(pet_charge_ + PET_CHARGE_PER_DEG * degrees_turned * (1 - roughness),
+                        (float)0, (float)1);
+    pet_agitation_ = CLAMP(pet_agitation_ + PET_AGITATION_PER_DEG * degrees_turned * roughness,
+                           (float)0, (float)1);
+    ui_state_.pet_charge = pet_charge_;
+    ui_state_.pet_agitation = pet_agitation_;
+    ui_state_.pet_speed = pet_speed_;
+}
+
+void InterfaceTask::playPetPulse(float strength) {
+    uint32_t now = millis();
+    if (now - pet_pulse_last_ms_ < PET_PULSE_MIN_MS) {
+        return;
+    }
+    pet_pulse_last_ms_ = now;
+    // A bump, not a click: press=false is the lighter of the two haptics, and the
+    // texture should sit under the detents rather than compete with them.
+    motor_task_.playHaptic(false, strength * settings_.clickForceScale());
+}
+
+void InterfaceTask::tickPetTexture() {
+    const PetTextureDescriptor& t = petTextureFor(pet_mood_);
+
+    // Grain rides distance covered, so it feels like something the hand is
+    // passing over rather than something happening to it.
+    if (t.grain_every_degrees > 0 && pet_grain_deg_ >= t.grain_every_degrees) {
+        pet_grain_deg_ = fmodf(pet_grain_deg_, t.grain_every_degrees);
+        playPetPulse(t.grain_strength);
+        return;
+    }
+
+    // Tremble rides the clock, so it keeps its own rhythm no matter how the knob
+    // is moved - which is exactly what tells a purr apart from a texture.
+    if (t.tremble_ms > 0 && millis() - pet_tremble_ms_ >= t.tremble_ms) {
+        pet_tremble_ms_ = millis();
+        playPetPulse(t.tremble_strength);
+    }
+}
+
+void InterfaceTask::endPetPat() {
+    pet_pat_open_ = false;
+    ui_state_.pet_petting = false;
+
+    // Feedback 2: the mood's own rhythm, played once the hand is still.
+    const PetMoodDescriptor& mood = petMoodAt(pet_mood_);
+    startPattern(mood.beats, mood.beat_kick_ms, mood.beat_gap_ms, mood.beat_strength, false);
+    ui_state_.pet_reaction_nonce++;
+
+    PetMood next = nextPetMood(pet_mood_, pet_charge_, pet_agitation_, pet_pat_degrees_);
+    if (next != pet_mood_) {
+        pet_pending_mood_ = next;
+        pet_mood_pending_ = true;
+    }
+    pet_pat_degrees_ = 0;
+    pet_speed_ = 0;
+    ui_state_.pet_speed = 0;
+    pet_tick_ms_ = millis();
+    publishUiState();
+}
+
+void InterfaceTask::tickPet() {
+    if (ui_state_.mode != UiMode::APP || currentApp().kind != AppKind::PET) {
+        if (pet_pat_open_) {
+            // Left the page with a hand still on the knob. The pat is dropped
+            // rather than finished: its reaction belongs to a page that is no
+            // longer showing, and the mood it would have earned was not seen out.
+            pet_pat_open_ = false;
+            pet_pat_degrees_ = 0;
+            pet_speed_ = 0;
+            ui_state_.pet_petting = false;
+            ui_state_.pet_speed = 0;
+            publishUiState();
+        }
+        return;
+    }
+
+    uint32_t now = millis();
+
+    if (pet_pat_open_) {
+        if (now - pet_last_stroke_ms_ >= PET_SETTLE_MS) {
+            endPetPat();
+            return;
+        }
+        // Mid-stroke: the coat's own grain and tremble, which is what the hand
+        // feels between the detents.
+        tickPetTexture();
+        return;
+    }
+
+    if (pet_mood_pending_ && pattern_beats_left_ == 0) {
+        setPetMood(pet_pending_mood_);
+        return;
+    }
+
+    // The rest is idle upkeep, run in tenths of a second: the decay is slow, and
+    // every step of it pushes state across to the display task.
+    if (now - pet_tick_ms_ < 100) {
+        return;
+    }
+    uint32_t dt_ms = now - pet_tick_ms_;
+    pet_tick_ms_ = now;
+
+    if (pet_charge_ > 0 || pet_agitation_ > 0) {
+        // Both bleed away while the pet is left alone, so a mood has to be earned
+        // in one sitting rather than over a whole evening. Agitation goes faster
+        // than affection: the pet calms down sooner than it forgets kindness.
+        float dt_s = dt_ms / 1000.0f;
+        pet_charge_ = CLAMP(pet_charge_ - PET_CHARGE_DECAY_PER_S * dt_s, (float)0, (float)1);
+        pet_agitation_ = CLAMP(pet_agitation_ - PET_AGITATION_DECAY_PER_S * dt_s, (float)0, (float)1);
+        ui_state_.pet_charge = pet_charge_;
+        ui_state_.pet_agitation = pet_agitation_;
+        publishUiState();
+    }
+
+    if (pet_mood_ != PetMood::SLEEPY && now - pet_last_stroke_ms_ >= PET_IDLE_SLEEP_MS) {
+        setPetMood(PetMood::SLEEPY);
+    }
+}
+
+void InterfaceTask::setPetMood(PetMood mood) {
+    pet_mood_ = mood;
+    pet_mood_pending_ = false;
+    pet_charge_ = petChargeAfterMood(mood);
+    pet_agitation_ = petAgitationAfterMood(mood);
+    // The new mood brings a new coat, so the texture's counters start fresh
+    // rather than firing a grain pulse left over from the old one.
+    pet_grain_deg_ = 0;
+    pet_tremble_ms_ = millis();
+
+    ui_state_.pet_mood = (uint8_t)mood;
+    ui_state_.pet_charge = pet_charge_;
+    ui_state_.pet_agitation = pet_agitation_;
+    ui_state_.pet_mood_nonce++;
+    publishUiState();
+
+    // Feedback 1 changes with the mood, so re-apply the page's config: the knob
+    // starts feeling like the new mood before it is patted again.
+    applyLocalConfig(currentAppConfig());
+
+    snprintf(buf_, sizeof(buf_), "Pet mood: %s", petMoodAt(mood).name);
+    log(buf_);
 }
 
 const char* InterfaceTask::channelName(HostChannel channel) {

@@ -94,6 +94,36 @@ void arc(TFT_eSprite& spr, float radius_inner, float radius_outer, float start_d
     }
 }
 
+void strokeArc(TFT_eSprite& spr, float cx, float cy, float radius, float thickness, float start_deg, float end_deg, uint16_t color) {
+    if (radius <= 0) {
+        return;
+    }
+    float step = 51.6f / max(1.0f, radius);
+    int32_t steps = (int32_t)(fabsf(end_deg - start_deg) / step) + 1;
+    float direction = end_deg > start_deg ? step : -step;
+    float inner = max(0.0f, radius - thickness / 2);
+    float outer = radius + thickness / 2;
+    for (int32_t i = 0; i <= steps; i++) {
+        float rad = (start_deg + direction * i) * PI / 180;
+        float cos_a = cosf(rad);
+        float sin_a = sinf(rad);
+        spr.drawLine(cx + inner * cos_a, cy - inner * sin_a, cx + outer * cos_a, cy - outer * sin_a, color);
+    }
+}
+
+void stroke(TFT_eSprite& spr, float x0, float y0, float x1, float y1, uint16_t color) {
+    float dx = x1 - x0;
+    float dy = y1 - y0;
+    float len = sqrtf(dx * dx + dy * dy);
+    spr.drawLine(x0, y0, x1, y1, color);
+    if (len < 0.001f) {
+        return;
+    }
+    float nx = -dy / len;
+    float ny = dx / len;
+    spr.drawLine(x0 + nx, y0 + ny, x1 + nx, y1 + ny, color);
+}
+
 void ring(TFT_eSprite& spr, float radius, uint16_t color) {
     spr.drawCircle(CENTER_X, CENTER_Y, radius, color);
 }

@@ -49,6 +49,10 @@ uint16_t mix(uint16_t a, uint16_t b, float t);
 
 /** Filled band between two radii, swept between two angles (degrees, CCW). */
 void arc(TFT_eSprite& spr, float radius_inner, float radius_outer, float start_deg, float end_deg, uint16_t color);
+/** Stroked arc around an arbitrary centre, drawn as radial spokes. */
+void strokeArc(TFT_eSprite& spr, float cx, float cy, float radius, float thickness, float start_deg, float end_deg, uint16_t color);
+/** Two-pixel-wide line, thickened perpendicular to its direction. */
+void stroke(TFT_eSprite& spr, float x0, float y0, float x1, float y1, uint16_t color);
 /** Hairline circle centred on the face. */
 void ring(TFT_eSprite& spr, float radius, uint16_t color);
 /** Radial tick, centred on the given angle. */

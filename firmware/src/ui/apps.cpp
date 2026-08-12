@@ -75,6 +75,28 @@ const AppDescriptor APPS[] = {
         },
     },
     {
+        // The page owns its own haptics: every mood re-applies petConfig(), so
+        // the config here only covers the moment between opening the page and
+        // that first apply. It matches the calm mood so the two agree.
+        "PET",
+        "Rotate to pat",
+        AppIcon::PET,
+        ValueStyle::COUNT,
+        PressAction::PET_MOOD,
+        nullptr,
+        0,
+        AppKind::PET,
+        HostChannel::NONE,
+        {
+            0, 0, 0,
+            0, -1, 8 * PI / 180,
+            0.55, 1, 1.1,
+            "Pet",
+            0, {}, 0,
+            32,
+        },
+    },
+    {
         "SETTINGS",
         "Tune the knob",
         AppIcon::SETTINGS,
@@ -161,6 +183,7 @@ const uint8_t MENU_ITEMS[] = {
     APP_VOLUME,
     APP_BRIGHTNESS,
     APP_TIMER,
+    APP_PET,
     APP_SETTINGS,
 };
 

@@ -4,6 +4,7 @@
 #include "../font/roboto_light_60.h"
 #include "../util.h"
 #include "apps.h"
+#include "pet.h"
 #include "settings.h"
 #include "ui_icons.h"
 #include "ui_theme.h"
@@ -31,6 +32,14 @@ struct Anim {
     uint8_t press_nonce = 0;
     uint32_t transition_start_ms = 0;
     uint32_t ripple_start_ms = 0;
+
+    /** Smoothed 0-1 "is being patted", so the face eases in and out of a pat. */
+    float pet_petting = 0;
+    /** Start of the after-pat emote, and the last mood change. */
+    uint32_t pet_reaction_start_ms = 0;
+    uint32_t pet_mood_start_ms = 0;
+    uint8_t pet_reaction_nonce = 0;
+    uint8_t pet_mood_nonce = 0;
 };
 
 Anim anim;
@@ -507,6 +516,460 @@ void drawSettingEdit(TFT_eSprite& spr, const PB_SmartKnobState& state, const UiS
 
 }  // namespace
 
+namespace {
+
+/** How long the after-pat emote holds before the face settles back. */
+constexpr uint32_t PET_REACTION_MS = 1100;
+
+/**
+ * The face, as numbers. Every mood, the pat itself and the after-pat emote all
+ * work by moving these, so the three never fight over the same pixels: the mood
+ * sets them, a pat bends them, and the reaction bends them again.
+ */
+struct PetFace {
+    float eye_rx;      // oval half-width
+    float eye_ry;      // oval half-height; the ovals are what read as eyes
+    float left_open;   // per-eye vertical scale, so one can wink
+    float right_open;
+    float lid;         // 0-1, how much a curved lid replaces the oval
+    float brow;        // >0 lowered and angry, <0 raised
+    float mouth;       // +1 smile through to -1 frown
+    float mouth_width;
+    float bounce;      // body offset, breathing or bouncing
+    float wobble;      // sideways shake
+};
+
+PetFace petFaceFor(PetMood mood, float petting, float reaction, uint32_t now_ms) {
+    PetFace f = {13, 15, 1, 1, 0, 0, 0.5f, 28, 0, 0};
+
+    switch (mood) {
+        case PetMood::CALM:
+            f.eye_ry = 13;
+            f.lid = 0.15f;
+            f.mouth = 0.45f;
+            f.bounce = sinf(now_ms * 0.0018f) * 2.0f;
+            break;
+        case PetMood::CURIOUS:
+            f.eye_rx = 12;
+            f.eye_ry = 17;
+            f.brow = -0.65f;
+            f.mouth = 0.15f;
+            f.mouth_width = 20;
+            f.bounce = sinf(now_ms * 0.0032f) * 1.5f;
+            break;
+        case PetMood::HAPPY:
+            f.eye_ry = 18;
+            f.mouth = 1.0f;
+            f.mouth_width = 34;
+            f.bounce = sinf(now_ms * 0.006f) * 3.0f;
+            break;
+        case PetMood::LOVING:
+            f.eye_ry = 11;
+            f.lid = 0.5f;
+            f.mouth = 0.9f;
+            f.mouth_width = 32;
+            f.bounce = sinf(now_ms * 0.0024f) * 2.5f;
+            break;
+        case PetMood::PLAYFUL:
+            f.eye_ry = 17;
+            // A slow alternating wink; the timing is deliberately not the bounce's.
+            f.right_open = sinf(now_ms * 0.0021f) > 0.75f ? 0.15f : 1;
+            f.mouth = 0.85f;
+            f.mouth_width = 31;
+            f.bounce = sinf(now_ms * 0.011f) * 4.0f;
+            f.wobble = sinf(now_ms * 0.008f) * 2.0f;
+            break;
+        case PetMood::SKITTISH:
+            f.eye_rx = 11;
+            f.eye_ry = 14;
+            f.left_open = sinf(now_ms * 0.018f) > 0.82f ? 0.35f : 1;
+            f.right_open = sinf(now_ms * 0.021f + 1.4f) > 0.86f ? 0.35f : 1;
+            f.mouth = -0.15f;
+            f.mouth_width = 19;
+            f.wobble = sinf(now_ms * 0.022f) * 2.0f;
+            break;
+        case PetMood::ANNOYED:
+            f.eye_rx = 14;
+            f.eye_ry = 10;
+            f.brow = 0.7f;
+            f.mouth = -0.35f;
+            f.mouth_width = 26;
+            f.wobble = sinf(now_ms * 0.014f) * 0.8f;
+            break;
+        case PetMood::GRUMPY:
+            f.eye_rx = 14;
+            f.eye_ry = 9;
+            f.brow = 1;
+            f.mouth = -0.8f;
+            f.mouth_width = 24;
+            break;
+        case PetMood::SLEEPY:
+        default:
+            f.eye_ry = 4;
+            f.lid = 0.85f;
+            f.mouth = 0.15f;
+            f.mouth_width = 16;
+            f.bounce = sinf(now_ms * 0.0012f) * 3.5f;
+            break;
+    }
+
+    // Being patted, per mood. The happy family screws its eyes shut and smiles
+    // wider, grumpy narrows and scowls harder, sleepy stirs half awake.
+    if (petting > 0.01f) {
+        switch (mood) {
+            case PetMood::GRUMPY:
+                f.eye_ry *= 1 - 0.35f * petting;
+                f.brow += petting;
+                f.mouth -= 0.3f * petting;
+                f.wobble += sinf(now_ms * 0.05f) * 2.5f * petting;
+                break;
+            case PetMood::SLEEPY:
+                f.eye_ry += 7 * petting;
+                f.lid -= 0.55f * petting;
+                f.mouth += 0.25f * petting;
+                break;
+            default:
+                f.eye_ry *= 1 - 0.7f * petting;
+                f.lid = f.lid + (1 - f.lid) * 0.85f * petting;
+                f.left_open = 1;
+                f.right_open = 1;
+                f.mouth += 0.4f * petting;
+                f.wobble += sinf(now_ms * 0.03f) * 2.0f * petting;
+                break;
+        }
+        f.mouth_width += 4 * petting;
+    }
+
+    // The beat after the hand lifts, held while the haptic reaction plays.
+    if (reaction > 0.01f) {
+        switch (mood) {
+            case PetMood::CURIOUS:
+                f.eye_ry *= 1 + 0.35f * reaction;
+                f.brow -= 0.4f * reaction;
+                f.mouth += 0.25f * reaction;
+                break;
+            case PetMood::LOVING:
+                f.lid = 0.9f;
+                f.eye_ry *= 0.7f;
+                f.mouth += 0.35f * reaction;
+                break;
+            case PetMood::SKITTISH:
+                f.eye_ry *= 1 + 0.55f * reaction;
+                f.wobble += sinf(now_ms * 0.08f) * 4.0f * reaction;
+                break;
+            case PetMood::ANNOYED:
+                f.eye_ry *= 1 + 0.45f * reaction;
+                f.brow += 0.45f * reaction;
+                f.wobble += sinf(now_ms * 0.07f) * 2.0f * reaction;
+                break;
+            case PetMood::GRUMPY:
+                f.eye_ry *= 1 + 1.1f * reaction;
+                f.brow += 0.5f * reaction;
+                f.wobble += sinf(now_ms * 0.06f) * 3.0f * reaction;
+                break;
+            case PetMood::SLEEPY:
+                f.eye_ry *= 1 - 0.6f * reaction;
+                f.lid += 0.4f * reaction;
+                break;
+            case PetMood::PLAYFUL:
+                f.left_open = 1;
+                f.right_open = 1;
+                f.eye_ry *= 1 + 0.35f * reaction;
+                f.bounce -= 5 * reaction;
+                break;
+            default:
+                // Content: eyes stay creased shut a moment longer.
+                f.lid = f.lid + (1 - f.lid) * 0.75f * reaction;
+                f.eye_ry *= 1 - 0.55f * reaction;
+                f.mouth += 0.35f * reaction;
+                break;
+        }
+    }
+
+    f.mouth = CLAMP(f.mouth, (float)-1, (float)1.4f);
+    return f;
+}
+
+}  // namespace
+
+namespace {
+
+/** One eye: an oval, or a curved lid once it closes. */
+void drawPetEye(TFT_eSprite& spr, float cx, float cy, const PetFace& f, float open, uint16_t color) {
+    float rx = f.eye_rx;
+    float ry = f.eye_ry * open;
+
+    if (f.lid > 0.55f || ry < 2.5f) {
+        // Closed: a lid arc curving the way the mood does, so a happy squeeze and
+        // a sleepy doze do not look alike.
+        float curve = f.mouth >= 0 ? 1.0f : -1.0f;
+        strokeArc(spr, cx, cy - curve * rx * 0.5f, rx * 1.15f, 2,
+                  curve > 0 ? 200 : 20, curve > 0 ? 340 : 160, color);
+        return;
+    }
+
+    if (rx >= 1 && ry >= 1) {
+        spr.fillEllipse((int32_t)cx, (int32_t)cy, (int32_t)rx, (int32_t)ry, color);
+        if (f.lid > 0.05f) {
+            // A partly dropped lid, drawn by cutting the top of the oval away.
+            int32_t cut = (int32_t)(ry * 2 * f.lid);
+            spr.fillRect((int32_t)(cx - rx - 1), (int32_t)(cy - ry - 1),
+                         (int32_t)(rx * 2 + 3), cut, COLOR_BG);
+        }
+        // Catchlight, which is most of what makes the ovals read as alive.
+        if (ry > 5) {
+            spr.fillCircle((int32_t)(cx - rx * 0.35f), (int32_t)(cy - ry * 0.35f),
+                           max(1.0f, rx * 0.22f), COLOR_SPECULAR);
+        }
+    }
+}
+
+void drawPetHeart(TFT_eSprite& spr, float cx, float cy, float s, uint16_t color) {
+    spr.fillCircle(cx - s * 0.5f, cy - s * 0.35f, s * 0.55f, color);
+    spr.fillCircle(cx + s * 0.5f, cy - s * 0.35f, s * 0.55f, color);
+    spr.fillTriangle(cx - s, cy - s * 0.1f, cx + s, cy - s * 0.1f, cx, cy + s, color);
+}
+
+void drawPetZ(TFT_eSprite& spr, float cx, float cy, float s, uint16_t color) {
+    stroke(spr, cx - s, cy - s, cx + s, cy - s, color);
+    stroke(spr, cx + s, cy - s, cx - s, cy + s, color);
+    stroke(spr, cx - s, cy + s, cx + s, cy + s, color);
+}
+
+void drawPetSpark(TFT_eSprite& spr, float cx, float cy, float s, uint16_t color) {
+    stroke(spr, cx - s, cy, cx + s, cy, color);
+    stroke(spr, cx, cy - s, cx, cy + s, color);
+    stroke(spr, cx - s * 0.6f, cy - s * 0.6f, cx + s * 0.6f, cy + s * 0.6f, color);
+    stroke(spr, cx - s * 0.6f, cy + s * 0.6f, cx + s * 0.6f, cy - s * 0.6f, color);
+}
+
+}  // namespace
+
+namespace {
+
+// The pet is the one page where colour carries meaning rather than decoration,
+// so grumpy and sleepy step outside the champagne family the rest of the UI
+// keeps to. Both survive the sprite's 3-3-2 quantisation.
+constexpr uint16_t COLOR_PET_CROSS = rgb565(225, 95, 60);
+constexpr uint16_t COLOR_PET_DOZE = rgb565(120, 150, 220);
+
+uint16_t petAccent(PetMood mood) {
+    switch (mood) {
+        case PetMood::CURIOUS:
+            return rgb565(120, 205, 225);
+        case PetMood::LOVING:
+            return rgb565(235, 105, 165);
+        case PetMood::SKITTISH:
+            return rgb565(240, 170, 75);
+        case PetMood::ANNOYED:
+            return rgb565(235, 105, 70);
+        case PetMood::GRUMPY:
+            return COLOR_PET_CROSS;
+        case PetMood::SLEEPY:
+            return COLOR_PET_DOZE;
+        case PetMood::HAPPY:
+        case PetMood::PLAYFUL:
+            return COLOR_GOLD;
+        case PetMood::CALM:
+        default:
+            return COLOR_GOLD_SOFT;
+    }
+}
+
+/** The mood's own after-pat emote, floating up around the head as it fades. */
+void drawPetEmote(TFT_eSprite& spr, PetMood mood, float head_y, float progress, uint16_t accent) {
+    float rise = easeOutCubic(progress) * 26;
+    float fade = 1 - progress;
+    uint16_t color = mix(COLOR_BG, accent, fade);
+
+    switch (mood) {
+        case PetMood::CURIOUS:
+            // A question mark asks back: the curious pet is listening for more.
+            stroke(spr, CENTER_X + 56, head_y - 36 - rise,
+                   CENTER_X + 67, head_y - 45 - rise, color);
+            stroke(spr, CENTER_X + 67, head_y - 45 - rise,
+                   CENTER_X + 73, head_y - 35 - rise, color);
+            stroke(spr, CENTER_X + 73, head_y - 35 - rise,
+                   CENTER_X + 64, head_y - 23 - rise, color);
+            spr.fillCircle(CENTER_X + 63, head_y - 15 - rise, 2, color);
+            break;
+        case PetMood::LOVING:
+            drawPetHeart(spr, CENTER_X, head_y - 34 - rise,
+                         13 - 4 * progress, color);
+            break;
+        case PetMood::SKITTISH:
+            for (uint8_t i = 0; i < 3; i++) {
+                float side = i == 1 ? 0 : (i == 0 ? -1.0f : 1.0f);
+                float x = CENTER_X + side * (i == 1 ? 0 : 59);
+                stroke(spr, x - 5, head_y - 27 - rise + i * 5,
+                       x + 5, head_y - 33 - rise + i * 5, color);
+            }
+            break;
+        case PetMood::ANNOYED:
+            for (uint8_t i = 0; i < 2; i++) {
+                float side = i == 0 ? -1.0f : 1.0f;
+                float x = CENTER_X + side * 60;
+                stroke(spr, x - side * 7, head_y - 35 - rise,
+                       x + side * 7, head_y - 25 - rise, color);
+                stroke(spr, x - side * 5, head_y - 20 - rise,
+                       x + side * 5, head_y - 14 - rise, color);
+            }
+            break;
+        case PetMood::HAPPY:
+            for (uint8_t i = 0; i < 2; i++) {
+                float side = i == 0 ? -1.0f : 1.0f;
+                drawPetHeart(spr, CENTER_X + side * 62, head_y - 18 - rise - i * 10,
+                             7 - 2 * progress, color);
+            }
+            break;
+        case PetMood::PLAYFUL:
+            for (uint8_t i = 0; i < 3; i++) {
+                float side = i == 1 ? 0 : (i == 0 ? -1.0f : 1.0f);
+                drawPetSpark(spr, CENTER_X + side * 60, head_y - 34 - rise + i * 6,
+                             8 - 3 * progress, color);
+            }
+            break;
+        case PetMood::SLEEPY:
+            for (uint8_t i = 0; i < 2; i++) {
+                drawPetZ(spr, CENTER_X + 52 + i * 14, head_y - 34 - rise - i * 14,
+                         6 - 2 * progress, color);
+            }
+            break;
+        case PetMood::GRUMPY:
+            // Two short bars, the way a comic shows a huff.
+            for (uint8_t i = 0; i < 2; i++) {
+                float side = i == 0 ? -1.0f : 1.0f;
+                float x = CENTER_X + side * 58;
+                stroke(spr, x, head_y - 30 - rise, x + side * 9, head_y - 38 - rise, color);
+                stroke(spr, x - side * 2, head_y - 20 - rise, x + side * 7, head_y - 26 - rise, color);
+            }
+            break;
+        case PetMood::CALM:
+        default:
+            // Purr: soft arcs washing outward from both cheeks.
+            for (uint8_t i = 0; i < 2; i++) {
+                float side = i == 0 ? 180.0f : 0.0f;
+                strokeArc(spr, CENTER_X, head_y, 62 + rise, 2,
+                          side - 26, side + 26, mix(COLOR_BG, accent, fade * 0.7f));
+            }
+            break;
+    }
+}
+
+/**
+ * The pet page. There is no value here: rotation is a pat, so the face and the
+ * two feedback channels are the whole readout. The attention arc along the
+ * bottom is the only number, and it is what moves the mood along.
+ */
+void drawPet(TFT_eSprite& spr, const UiState& ui_state, uint32_t now_ms, float enter) {
+    PetMood mood = (PetMood)(ui_state.pet_mood < PET_MOOD_COUNT ? ui_state.pet_mood : 0);
+    const PetMoodDescriptor& d = petMoodAt(mood);
+    uint16_t accent = petAccent(mood);
+
+    backdrop(spr, now_ms, enter);
+
+    float reaction = 0;
+    if (anim.pet_reaction_start_ms != 0) {
+        uint32_t elapsed = now_ms - anim.pet_reaction_start_ms;
+        if (elapsed < PET_REACTION_MS) {
+            reaction = 1 - (float)elapsed / PET_REACTION_MS;
+        }
+    }
+    // A pat in progress owns the face; the reaction only takes over once it ends.
+    float petting = anim.pet_petting;
+    reaction *= 1 - petting;
+
+    PetFace f = petFaceFor(mood, petting, reaction, now_ms);
+
+    // A fresh mood pops in, so a change is felt on screen as well as in the knob.
+    float mood_age = clamp01((float)(now_ms - anim.pet_mood_start_ms) / 420);
+    float pop = lerpf(0.88f, 1, easeOutBack(mood_age));
+
+    float head_r = 50 * pop * lerpf(0.85f, 1, enter);
+    float head_x = CENTER_X + f.wobble;
+    float head_y = CENTER_Y - 4 + f.bounce;
+    uint16_t line = mix(COLOR_BG, accent, enter);
+
+    // Ears, then the head outline over their bases.
+    for (int8_t side = -1; side <= 1; side += 2) {
+        float ex = head_x + side * head_r * 0.72f;
+        spr.fillTriangle(ex - head_r * 0.26f, head_y - head_r * 0.70f,
+                         ex + head_r * 0.26f, head_y - head_r * 0.60f,
+                         ex + side * head_r * 0.14f, head_y - head_r * 1.34f, line);
+    }
+    strokeArc(spr, head_x, head_y, head_r, 2, 0, 360, line);
+    strokeArc(spr, head_x, head_y, head_r - 4, 1, 0, 360, mix(COLOR_BG, dim(accent, 0.35f), enter));
+
+    float eye_dx = head_r * 0.42f;
+    float eye_y = head_y - head_r * 0.10f;
+    uint16_t eye_color = mix(COLOR_BG, COLOR_TEXT, enter);
+    drawPetEye(spr, head_x - eye_dx, eye_y, f, f.left_open, eye_color);
+    drawPetEye(spr, head_x + eye_dx, eye_y, f, f.right_open, eye_color);
+
+    if (f.brow > 0.01f) {
+        // Brows only exist when a mood needs them, which is what makes them read.
+        float drop = 6 + 4 * clamp01(f.brow);
+        for (int8_t side = -1; side <= 1; side += 2) {
+            float bx = head_x + side * eye_dx;
+            stroke(spr, bx - side * f.eye_rx, eye_y - drop - 6,
+                   bx + side * f.eye_rx, eye_y - drop, line);
+        }
+    }
+
+    // Nose, then the mouth: one arc, curving up or down with the mood.
+    spr.fillCircle(head_x, head_y + head_r * 0.24f, 2.5f, line);
+    float mouth_y = head_y + head_r * 0.40f;
+    float curve = f.mouth;
+    if (fabsf(curve) < 0.06f) {
+        stroke(spr, head_x - f.mouth_width / 2, mouth_y, head_x + f.mouth_width / 2, mouth_y, line);
+    } else {
+        float radius = f.mouth_width / (0.55f + 0.75f * fabsf(curve));
+        if (curve > 0) {
+            strokeArc(spr, head_x, mouth_y - radius * 0.72f, radius, 2, 214, 326, line);
+        } else {
+            strokeArc(spr, head_x, mouth_y + radius * 0.72f, radius, 2, 34, 146, line);
+        }
+    }
+
+    if (reaction > 0.01f) {
+        drawPetEmote(spr, mood, head_y, 1 - reaction, accent);
+    }
+
+    // Attention: a short arc along the bottom rim rather than the full value
+    // sweep, so the page never reads as something with a value to set.
+    const float r_out = BEZEL_RADIUS - 8;
+    float sweep = 84 * enter;
+    arc(spr, r_out - 5, r_out, 270 - sweep / 2, 270 + sweep / 2, dim(COLOR_TRACK, 0.5f * enter));
+    float filled = sweep * clamp01(anim.value_unit);
+    if (filled > 0.5f) {
+        arc(spr, r_out - 5, r_out, 270 - sweep / 2, 270 - sweep / 2 + filled, dim(accent, enter));
+    }
+
+    char name[16];
+    upperCopy(name, sizeof(name), d.name);
+    trackedText(spr, name, CENTER_X, 24, &FreeSansBold9pt7b, mix(COLOR_BG, accent, enter), 3);
+
+    // One live line: what it is doing now, or how it answered the last pat. The
+    // hint only shows while the pet has been left alone.
+    const char* status = nullptr;
+    if (petting > 0.35f) {
+        status = d.while_petting;
+    } else if (reaction > 0.05f) {
+        status = d.after_petting;
+    } else if (anim.pet_reaction_start_ms == 0) {
+        status = "Rotate to pat";
+    }
+    if (status != nullptr && ui_state.hold_progress <= 0.02f) {
+        centeredText(spr, status, CENTER_X, CENTER_Y + 66, &FreeSans9pt7b,
+                     mix(COLOR_BG, COLOR_TEXT_DIM, enter * 0.9f));
+    }
+
+    drawRipple(spr, rippleProgress(now_ms));
+    drawHoldIndicator(spr, ui_state.hold_progress);
+}
+
+}  // namespace
+
 void renderInit(TFT_eSprite& spr) {
     spr.setTextWrap(false);
     spr.setTextDatum(CC_DATUM);
@@ -528,11 +991,16 @@ void render(TFT_eSprite& spr, const PB_SmartKnobState& state, const UiState& ui_
                       CLAMP(state.sub_position_unit, (float)-0.55, (float)0.55);
     }
 
+    const AppDescriptor& open_app = APPS[ui_state.app_index < APP_COUNT ? ui_state.app_index : 0];
+    bool pet_page = ui_state.mode == UiMode::APP && open_app.kind == AppKind::PET;
+
     float value_target = positionUnit(state);
-    if (ui_state.mode == UiMode::APP && ui_state.timer_total_s > 0 &&
-        APPS[ui_state.app_index < APP_COUNT ? ui_state.app_index : 0].kind == AppKind::TIMER) {
+    if (ui_state.mode == UiMode::APP && ui_state.timer_total_s > 0 && open_app.kind == AppKind::TIMER) {
         // While counting down, the arc tracks time left rather than knob position.
         value_target = clamp01((float)ui_state.timer_remaining_s / ui_state.timer_total_s);
+    } else if (pet_page) {
+        // The pet page has no position to show; its arc tracks attention instead.
+        value_target = clamp01(ui_state.pet_charge);
     }
 
     if (!anim.initialised) {
@@ -540,6 +1008,11 @@ void render(TFT_eSprite& spr, const PB_SmartKnobState& state, const UiState& ui_
         anim.last_frame_ms = now_ms;
         anim.mode_nonce = ui_state.mode_nonce;
         anim.press_nonce = ui_state.press_nonce;
+        // Adopted rather than compared, so the first frame does not replay a
+        // reaction or a mood change that happened before the display woke up.
+        anim.pet_reaction_nonce = ui_state.pet_reaction_nonce;
+        anim.pet_mood_nonce = ui_state.pet_mood_nonce;
+        anim.pet_petting = ui_state.pet_petting ? 1.0f : 0.0f;
         anim.transition_start_ms = now_ms;
         anim.carousel = carousel_target;
         anim.value_unit = value_target;
@@ -561,6 +1034,24 @@ void render(TFT_eSprite& spr, const PB_SmartKnobState& state, const UiState& ui_
         anim.ripple_start_ms = now_ms;
     }
 
+    if (ui_state.pet_reaction_nonce != anim.pet_reaction_nonce) {
+        anim.pet_reaction_nonce = ui_state.pet_reaction_nonce;
+        anim.pet_reaction_start_ms = now_ms;
+    }
+    if (ui_state.pet_mood_nonce != anim.pet_mood_nonce) {
+        anim.pet_mood_nonce = ui_state.pet_mood_nonce;
+        anim.pet_mood_start_ms = now_ms;
+    }
+    if (!pet_page) {
+        // Leaving the page clears the reaction, so returning to it shows the idle
+        // hint rather than replaying a stale emote.
+        anim.pet_reaction_start_ms = 0;
+    }
+    // Patting eases in fast and out slowly: the face should not snap straight back
+    // the instant the knob stops moving.
+    anim.pet_petting = approach(anim.pet_petting, ui_state.pet_petting ? 1.0f : 0.0f,
+                                dt, ui_state.pet_petting ? 20 : 6);
+
     anim.carousel = approach(anim.carousel, carousel_target, dt, 16);
     anim.value_unit = approach(anim.value_unit, value_target, dt, 18);
     anim.list = approach(anim.list, list_target, dt, 15);
@@ -570,7 +1061,11 @@ void render(TFT_eSprite& spr, const PB_SmartKnobState& state, const UiState& ui_
     spr.fillSprite(COLOR_BG);
     switch (ui_state.mode) {
         case UiMode::APP:
-            drawApp(spr, state, ui_state, now_ms, enter);
+            if (pet_page) {
+                drawPet(spr, ui_state, now_ms, enter);
+            } else {
+                drawApp(spr, state, ui_state, now_ms, enter);
+            }
             break;
         case UiMode::REMOTE:
             drawRemote(spr, state, now_ms, enter);
