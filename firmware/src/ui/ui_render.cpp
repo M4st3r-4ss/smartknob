@@ -537,6 +537,13 @@ namespace {
 constexpr uint32_t PET_REACTION_MS = 1100;
 
 /**
+ * Head start the loving mood's left heart has over its right one, as a fraction
+ * of the emote. Written as a delay in milliseconds over the whole beat so it
+ * stays 0.3s if PET_REACTION_MS is ever retuned.
+ */
+constexpr float PET_HEART_DELAY = 300.0f / PET_REACTION_MS;
+
+/**
  * The face, as numbers. Every mood, the pat itself and the after-pat emote all
  * work by moving these, so the three never fight over the same pixels: the mood
  * sets them, a pat bends them, and the reaction bends them again.
@@ -986,10 +993,24 @@ void drawPetEmote(TFT_eSprite& spr, PetMood mood, float face_y, float progress, 
                    CENTER_X + 68, face_y - 23 - rise, color);
             spr.fillCircle(CENTER_X + 67, face_y - 15 - rise, 2, color);
             break;
-        case PetMood::LOVING:
-            drawPetHeart(spr, CENTER_X, face_y - 46 - rise,
-                         13 - 4 * progress, color);
+        case PetMood::LOVING: {
+            // A pair, one per side, rather than a single heart over the middle of
+            // the face: that one rose straight through where the mood title now
+            // sits. They are flown at different heights and the right one is held
+            // back, so the two read as a flutter rather than one symmetrical pop.
+            drawPetHeart(spr, CENTER_X - 70, face_y - 34 - rise,
+                         11 - 3 * progress, color);
+
+            // Rescaled onto the beat that is left rather than simply offset: a
+            // plain offset would still be mid-rise and half-lit when the emote
+            // stops being drawn, so the late heart would vanish in mid-air.
+            float late = (progress - PET_HEART_DELAY) / (1 - PET_HEART_DELAY);
+            if (late > 0) {
+                drawPetHeart(spr, CENTER_X + 70, face_y - 18 - easeOutCubic(late) * 26,
+                             11 - 3 * late, mix(COLOR_BG, accent, 1 - late));
+            }
             break;
+        }
         case PetMood::SKITTISH:
             for (uint8_t i = 0; i < 3; i++) {
                 float side = i == 1 ? 0 : (i == 0 ? -1.0f : 1.0f);
@@ -1122,7 +1143,9 @@ void drawPet(TFT_eSprite& spr, const UiState& ui_state, uint32_t now_ms, float e
 
     char name[16];
     upperCopy(name, sizeof(name), d.name);
-    trackedText(spr, name, CENTER_X, 24, &FreeSansBold9pt7b, mix(COLOR_BG, accent, enter), 3);
+    // A line lower than it used to sit: 22px, which is this font's yAdvance, so
+    // the drop is exactly the height of the text itself.
+    trackedText(spr, name, CENTER_X, 46, &FreeSansBold9pt7b, mix(COLOR_BG, accent, enter), 3);
 
     // One live line: what it is doing now, or how it answered the last pat. The
     // hint only shows while the pet has been left alone.
