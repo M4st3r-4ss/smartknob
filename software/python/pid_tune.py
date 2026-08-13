@@ -97,8 +97,10 @@ def open_port(port):
     except serial.SerialException as e:
         raise SystemExit(
             f'Could not open {port}: {e}\n'
-            'Only one process can hold the port. If smartknob_deck is running, '
-            'stop it and try again.')
+            'Only one process can hold the port, and the deck agent usually has '
+            'it. Stop it with:\n'
+            '    py -m smartknob_deck --stop        (from software/python)\n'
+            'and start it again the same way without --stop when you are done.')
 
 
 class Trace:

@@ -21,11 +21,16 @@ const SettingDescriptor SETTINGS[] = {
     {"CLICK", "Press feedback", AppIcon::CLICK, SettingKind::PERCENT, 25, 200, 100, 3},
     // The three PID terms. Named for what they do to the feel rather than for
     // which letter they are: "spring" is P, "droop" is what I removes, "damping"
-    // is D. 100% is the tuned schedule, so every one of them is a departure from
-    // a working default in a direction you can hear and feel.
+    // is D. 100% is the tuned schedule the gains were chosen against, so moving
+    // one is a departure from a working default in a direction you can hear.
+    //
+    // Damping ships at 0: the schedule's damping is what keeps a fine detent
+    // from ringing, but it is also the term that turns sensor noise into audible
+    // motor buzz, and the knob is quieter without it. Turn it up if a detent
+    // feels like it bounces before it settles.
     {"SPRING", "Detent stiffness", AppIcon::SPRING, SettingKind::PERCENT, 25, 200, 100, 3},
     {"DROOP", "Centring pull", AppIcon::DROOP, SettingKind::PERCENT, 0, 200, 0, 3},
-    {"DAMPING", "Settling", AppIcon::DAMPING, SettingKind::PERCENT, 0, 250, 100, 3},
+    {"DAMPING", "Settling", AppIcon::DAMPING, SettingKind::PERCENT, 0, 250, 0, 3},
     {"MIN BRIGHT", "Screen floor", AppIcon::BRIGHTNESS, SettingKind::PERCENT, 2, 100, 2, 3.6},
     {"LED RING", "Knob backlight", AppIcon::BULB, SettingKind::ONOFF, 0, 1, 1, 60},
     {"LED LEVEL", "Ring brightness", AppIcon::LED, SettingKind::PERCENT, 5, 100, 100, 3.6},
