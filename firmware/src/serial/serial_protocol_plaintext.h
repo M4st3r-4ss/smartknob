@@ -75,6 +75,8 @@ class SerialProtocolPlaintext : public SerialProtocol {
         BackCallback back_callback_;
         StrainCalibrationCallback strain_calibration_callback_;
         HostValueCallback host_value_callback_;
+        HapticTuneCallback haptic_tune_callback_;
+        TraceCallback trace_callback_;
 
         /** Line buffer, filled only while an "@" command is being read. */
         char line_[48] = {};

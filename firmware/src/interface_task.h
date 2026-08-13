@@ -248,6 +248,13 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
         void requestHostValue(HostChannel channel);
         /** Handles an inbound "@VAL <channel> <value>" line from the host. */
         void handleHostValue(const char* channel, int32_t value);
+        /**
+         * Handles "@PID" and "@TRACE". Both go through the settings store rather
+         * than straight to the motor, so the rows on the knob show what the host
+         * asked for and the two ways of tuning cannot disagree.
+         */
+        void handleHapticTune(int16_t p, int16_t i, int16_t d);
+        void handleTraceCommand(bool enabled);
         const AppDescriptor& currentApp() const;
 
         void updateHardware();

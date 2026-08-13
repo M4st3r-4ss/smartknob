@@ -115,6 +115,14 @@ void InterfaceTask::run() {
         handleHostValue(channel, value);
     });
 
+    plaintext_protocol_.setHapticTuneCallback([this] (int16_t p, int16_t i, int16_t d) {
+        handleHapticTune(p, i, d);
+    });
+
+    plaintext_protocol_.setTraceCallback([this] (bool enabled) {
+        handleTraceCommand(enabled);
+    });
+
     // Start in legacy protocol mode
     current_protocol_ = &plaintext_protocol_;
 
@@ -485,8 +493,37 @@ void InterfaceTask::applyHapticSettings() {
     if (!haptic_settings_sent_ || trace != sent_trace_enabled_) {
         motor_task_.setTraceEnabled(trace);
         sent_trace_enabled_ = trace;
+        // Column names go out once, as the stream starts, so whatever is
+        // capturing has them before the first sample. Guarded on trace first:
+        // the startup call runs before current_protocol_ is set, and the row
+        // is never on at startup because it is deliberately not persisted.
+        if (trace && current_protocol_ == &plaintext_protocol_) {
+            plaintext_protocol_.sendTraceHeader();
+        }
     }
     haptic_settings_sent_ = true;
+}
+
+void InterfaceTask::handleHapticTune(int16_t p, int16_t i, int16_t d) {
+    // set() clamps each to its row's range, so a host asking for something the
+    // rows cannot express gets the nearest thing they can.
+    settings_.set(SettingId::DETENT_SPRING, p);
+    settings_.set(SettingId::DETENT_DROOP, i);
+    settings_.set(SettingId::DETENT_DAMPING, d);
+    // Committed straight away, unlike a row being swept by hand: a tuning session
+    // ends with the host closing the port, and there is no confirming press to
+    // hang the flash write on.
+    settings_.commit();
+    publishSettingValues();
+    publishUiState();
+    applyHapticSettings();
+}
+
+void InterfaceTask::handleTraceCommand(bool enabled) {
+    settings_.set(SettingId::TRACE, enabled ? 1 : 0);
+    publishSettingValues();
+    publishUiState();
+    applyHapticSettings();
 }
 
 void InterfaceTask::tickTelemetry() {
