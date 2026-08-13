@@ -78,6 +78,23 @@ def find_port():
         .format(', '.join(p.device for p in candidates)))
 
 
+def open_port(port):
+    """
+    Opens the knob's port, or says why it could not in the terms the person
+    running this can act on. Windows reports a port held by another process as a
+    bare permission error, which on this machine almost always means the deck
+    agent - the firmware upload hook restarts it, so it is usually back before
+    you think to look.
+    """
+    try:
+        return serial.Serial(port, SMARTKNOB_BAUD, timeout=READ_TIMEOUT_SECONDS)
+    except serial.SerialException as e:
+        raise SystemExit(
+            f'Could not open {port}: {e}\n'
+            'Only one process can hold the port. If smartknob_deck is running, '
+            'stop it and try again.')
+
+
 class Trace:
     """A capture: the column names the firmware sent, and the rows under them."""
 
@@ -114,7 +131,7 @@ def capture(port, seconds, gains=None, echo=False):
     """Streams the trace for a while and returns it. Leaves tracing off."""
     columns = None
     rows = []
-    with serial.Serial(port, SMARTKNOB_BAUD, timeout=READ_TIMEOUT_SECONDS) as ser:
+    with open_port(port) as ser:
         if gains is not None:
             ser.write('@PID {} {} {}\n'.format(*gains).encode('ascii'))
             # The motor task drops its integral on a gain change, so give the
@@ -350,14 +367,14 @@ def cmd_sweep(args):
     # The knob keeps whatever the last step set, which is rarely the one you
     # wanted. Put it back unless asked not to.
     if not args.keep:
-        with serial.Serial(port, SMARTKNOB_BAUD, timeout=READ_TIMEOUT_SECONDS) as ser:
+        with open_port(port) as ser:
             ser.write(f'@PID {args.p} {args.i} {args.d}\n'.encode('ascii'))
         print(f'Restored P={args.p} I={args.i} D={args.d}.')
 
 
 def cmd_set(args):
     port = args.port or find_port()
-    with serial.Serial(port, SMARTKNOB_BAUD, timeout=READ_TIMEOUT_SECONDS) as ser:
+    with open_port(port) as ser:
         ser.write(f'@PID {args.p} {args.i} {args.d}\n'.encode('ascii'))
     print(f'Set P={args.p}% I={args.i}% D={args.d}%.')
 
@@ -366,10 +383,16 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--port', help='Serial port; autodetected if omitted.')
+    # --port hangs off each command that opens one, rather than off the top
+    # level, so it can be typed after the command name - which is where a hand
+    # reaches for it, and where every example in this file's docstring puts it.
+    port_arg = argparse.ArgumentParser(add_help=False)
+    port_arg.add_argument('--port', help='Serial port; autodetected if omitted.')
+
     subparsers = parser.add_subparsers(dest='command', required=True)
 
-    p = subparsers.add_parser('capture', help='Record the trace stream.')
+    p = subparsers.add_parser('capture', help='Record the trace stream.',
+                              parents=[port_arg])
     p.add_argument('--seconds', type=float, default=15.0)
     p.add_argument('--out', help='Write the samples to this CSV.')
     p.add_argument('--echo', action='store_true',
@@ -380,14 +403,16 @@ def main(argv=None):
     p.add_argument('path')
     p.set_defaults(func=cmd_analyse)
 
-    p = subparsers.add_parser('set', help='Set the three multipliers, in percent.')
+    p = subparsers.add_parser('set', help='Set the three multipliers, in percent.',
+                              parents=[port_arg])
     p.add_argument('p', type=int)
     p.add_argument('i', type=int)
     p.add_argument('d', type=int)
     p.set_defaults(func=cmd_set)
 
     p = subparsers.add_parser(
-        'sweep', help='Walk one term through a range, scoring each step.')
+        'sweep', help='Walk one term through a range, scoring each step.',
+        parents=[port_arg])
     p.add_argument('--term', choices=['p', 'i', 'd'], default='d')
     p.add_argument('--values', default='60,100,140,180',
                    help='Comma-separated percentages for the swept term.')
