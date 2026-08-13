@@ -37,6 +37,12 @@ import serial.tools.list_ports
 SMARTKNOB_BAUD = 921600
 READ_TIMEOUT_SECONDS = 0.05
 
+# How long to keep asking for the stream before giving up. A knob that has just
+# been reset calibrates its motor first and answers nothing until it is done,
+# which is most of this budget.
+STARTUP_GRACE_SECONDS = 25.0
+TRACE_REQUEST_INTERVAL_SECONDS = 1.0
+
 # Duplicated from smartknob_deck rather than imported: that package pulls in the
 # Windows volume and brightness backends at import time, and none of them have
 # anything to do with tuning haptics.
@@ -138,12 +144,27 @@ def capture(port, seconds, gains=None, echo=False):
             # knob a moment to settle before we start believing what it reports.
             time.sleep(0.3)
         ser.reset_input_buffer()
-        ser.write(b'@TRACE 1\n')
 
-        deadline = time.monotonic() + seconds
+        # The clock starts when the first sample arrives, not when we ask. After
+        # a reset the knob spends several seconds calibrating its motor and is
+        # not reading serial, so a request sent now is simply lost - ask again
+        # until it answers rather than failing a capture that was only early.
+        started = None
+        next_request = 0.0
+        give_up = time.monotonic() + STARTUP_GRACE_SECONDS
         buffer = bytearray()
         try:
-            while time.monotonic() < deadline:
+            while True:
+                now = time.monotonic()
+                if started is None:
+                    if now >= give_up:
+                        break
+                    if now >= next_request:
+                        ser.write(b'@TRACE 1\n')
+                        next_request = now + TRACE_REQUEST_INTERVAL_SECONDS
+                elif now - started >= seconds:
+                    break
+
                 chunk = ser.read(4096)
                 if not chunk:
                     continue
@@ -160,6 +181,8 @@ def capture(port, seconds, gains=None, echo=False):
                             rows.append(row)
                     elif echo and line:
                         print(line)
+                if started is None and columns is not None:
+                    started = time.monotonic()
         except KeyboardInterrupt:
             pass
         finally:
@@ -168,8 +191,10 @@ def capture(port, seconds, gains=None, echo=False):
 
     if columns is None:
         raise SystemExit(
-            'No TRACE_HEADER arrived. The knob only streams over the plaintext '
-            'protocol - if something else has it in protobuf mode, unplug it.')
+            f'Asked for the stream for {STARTUP_GRACE_SECONDS:.0f}s and got no '
+            'TRACE_HEADER. Either the knob is still calibrating after a reset - '
+            'wait for the dial to come up and try again - or something has put '
+            'it in protobuf mode, which carries no traces.')
     return Trace(columns, rows)
 
 

@@ -98,6 +98,13 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
         QueueHandle_t log_queue_;
         QueueHandle_t knob_state_queue_;
         QueueHandle_t telemetry_queue_;
+        /**
+         * Samples the telemetry queue holds. The motor task offers one every
+         * 5ms and this task has been measured taking up to 64ms between ticks,
+         * so this covers the worst gap seen with room over it. Overflow drops
+         * samples at the motor end rather than blocking it.
+         */
+        static const uint8_t TELEMETRY_QUEUE_DEPTH = 32;
         SerialProtocolPlaintext plaintext_protocol_;
         SerialProtocolProtobuf proto_protocol_;
 

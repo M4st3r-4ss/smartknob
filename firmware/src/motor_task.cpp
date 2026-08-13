@@ -441,7 +441,10 @@ void MotorTask::publish(const PB_SmartKnobState& state) {
 
 void MotorTask::publishTelemetry(const HapticTelemetry& telemetry) {
     for (auto listener : telemetry_listeners_) {
-        xQueueOverwrite(listener, &telemetry);
+        // Sent rather than overwritten, and with a zero timeout: the consumer
+        // wants every sample, but not at the price of this loop waiting for it.
+        // A full queue drops the sample here and the trace shows the gap.
+        xQueueSend(listener, &telemetry, 0);
     }
 }
 

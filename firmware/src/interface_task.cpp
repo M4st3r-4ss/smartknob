@@ -48,9 +48,11 @@ InterfaceTask::InterfaceTask(const uint8_t task_core, MotorTask& motor_task, Dis
     knob_state_queue_ = xQueueCreate(1, sizeof(PB_SmartKnobState));
     assert(knob_state_queue_ != NULL);
 
-    // Depth 1 and overwritten, like the state queue: if this task falls behind,
-    // the tuning tool should miss samples rather than the motor loop stall.
-    telemetry_queue_ = xQueueCreate(1, sizeof(HapticTelemetry));
+    // Deep enough to bridge this task's worst tick gap at the rate the motor
+    // task fills it. The state queue next to it is depth 1 because only the
+    // newest state matters; a trace is the opposite, and a sample missed is a
+    // hole in the measurement.
+    telemetry_queue_ = xQueueCreate(TELEMETRY_QUEUE_DEPTH, sizeof(HapticTelemetry));
     assert(telemetry_queue_ != NULL);
 
     mutex_ = xSemaphoreCreateMutex();
@@ -527,15 +529,21 @@ void InterfaceTask::handleTraceCommand(bool enabled) {
 }
 
 void InterfaceTask::tickTelemetry() {
+    // Drains what is waiting rather than taking one sample per tick. This loop
+    // runs at something like 50Hz and the motor task fills at 200Hz, so one a
+    // tick delivered a quarter of the stream at 13-64ms spacing - which is
+    // coarser than the 3ms click impulse the trace exists to show.
     HapticTelemetry telemetry;
-    if (xQueueReceive(telemetry_queue_, &telemetry, 0) != pdTRUE) {
-        return;
-    }
-    // Only the plaintext protocol carries traces: the protobuf channel would need
-    // a new message type, and generating one means the nanopb submodule that
-    // building the firmware otherwise does without.
-    if (current_protocol_ == &plaintext_protocol_) {
-        plaintext_protocol_.sendTrace(telemetry);
+    for (uint8_t i = 0; i < TELEMETRY_QUEUE_DEPTH; i++) {
+        if (xQueueReceive(telemetry_queue_, &telemetry, 0) != pdTRUE) {
+            return;
+        }
+        // Only the plaintext protocol carries traces: the protobuf channel would
+        // need a new message type, and generating one means the nanopb submodule
+        // that building the firmware otherwise does without.
+        if (current_protocol_ == &plaintext_protocol_) {
+            plaintext_protocol_.sendTrace(telemetry);
+        }
     }
 }
 

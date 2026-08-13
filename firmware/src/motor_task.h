@@ -76,9 +76,10 @@ class MotorTask : public Task<MotorTask> {
 
         void addListener(QueueHandle_t queue);
         /**
-         * Registers a queue for telemetry. Depth-1 and written with an overwrite,
-         * like the state queue: a consumer that falls behind should skip samples
-         * rather than stall the motor loop.
+         * Registers a queue for telemetry. Unlike the state queue this one wants
+         * depth: every sample matters to a trace, where only the newest state
+         * matters to a listener. Writes never block, so a consumer that falls
+         * behind loses samples rather than stalling the motor loop.
          */
         void addTelemetryListener(QueueHandle_t queue);
         void setLogger(Logger* logger);
