@@ -28,8 +28,13 @@ struct UiState {
 
     /** Highlighted row while mode is SETTINGS or SETTING_EDIT. */
     uint8_t setting_index = 0;
-    /** Value of each settings row, so the list can show all of them at once. */
-    int16_t setting_values[8] = {};
+    /**
+     * Value of each settings row, so the list can show all of them at once.
+     * Sized to SETTING_COUNT, which InterfaceTask asserts at startup; settings.h
+     * cannot be included here without a cycle, so the two are kept in step by
+     * that assert rather than by the type.
+     */
+    int16_t setting_values[12] = {};
 
     /** Seconds left on the timer app, or 0 when it is not counting down. */
     uint32_t timer_remaining_s = 0;

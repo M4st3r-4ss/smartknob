@@ -97,8 +97,22 @@ class InterfaceTask : public Task<InterfaceTask>, public Logger {
 
         QueueHandle_t log_queue_;
         QueueHandle_t knob_state_queue_;
+        QueueHandle_t telemetry_queue_;
         SerialProtocolPlaintext plaintext_protocol_;
         SerialProtocolProtobuf proto_protocol_;
+
+        /**
+         * Pushes the haptic PID rows and the trace toggle to the motor task.
+         * Called at startup, whenever one of those rows is edited, and after a
+         * settings reset.
+         */
+        void applyHapticSettings();
+        /** Forwards any waiting telemetry sample to the serial protocol. */
+        void tickTelemetry();
+        /** Last gain scale sent, so an unrelated row edit does not resend it. */
+        HapticGainScale sent_gain_scale_ = HAPTIC_GAIN_SCALE_DEFAULT;
+        bool sent_trace_enabled_ = false;
+        bool haptic_settings_sent_ = false;
 
         void openMenu();
         void openApp(uint8_t index);

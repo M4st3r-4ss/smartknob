@@ -12,6 +12,15 @@ typedef std::function<void(void)> BackCallback;
 typedef std::function<void(void)> StrainCalibrationCallback;
 /** An "@VAL <channel> <value>" line from the host agent. */
 typedef std::function<void(const char*, int32_t)> HostValueCallback;
+/**
+ * An "@PID <p> <i> <d>" line: the three multipliers as percentages, matching the
+ * settings rows. Routed into the settings store rather than straight to the
+ * motor, so tuning over serial and tuning on the knob are the same state and the
+ * rows show what the host just asked for.
+ */
+typedef std::function<void(int16_t, int16_t, int16_t)> HapticTuneCallback;
+/** An "@TRACE <0|1>" line. */
+typedef std::function<void(bool)> TraceCallback;
 
 class SerialProtocolPlaintext : public SerialProtocol {
     public:
@@ -26,6 +35,23 @@ class SerialProtocolPlaintext : public SerialProtocol {
         void setHostValueCallback(HostValueCallback cb) {
             host_value_callback_ = cb;
         }
+
+        void setHapticTuneCallback(HapticTuneCallback cb) {
+            haptic_tune_callback_ = cb;
+        }
+
+        void setTraceCallback(TraceCallback cb) {
+            trace_callback_ = cb;
+        }
+
+        /**
+         * Emits one telemetry sample as a "TRACE:" CSV line. Plain text on the
+         * same stream as the logs, so a trace can be read with a serial monitor
+         * and nothing but this protocol is needed to capture one.
+         */
+        void sendTrace(const HapticTelemetry& telemetry);
+        /** Emits the column header, so a capture is self-describing. */
+        void sendTraceHeader();
 
         /**
          * Emits a host-agent line, e.g. "@SET volume 42" or "@GET volume".

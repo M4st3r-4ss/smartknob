@@ -217,6 +217,114 @@ static void iconCalibrate(TFT_eSprite& spr, int16_t cx, int16_t cy, float s, uin
     spr.fillCircle(cx, cy, 0.11f * s, color);
 }
 
+static void iconSpring(TFT_eSprite& spr, int16_t cx, int16_t cy, float s, uint16_t color, float value_unit) {
+    // A coil between two plates, wound tighter as the stiffness goes up. The
+    // glyph changes in the same direction the setting does, so the row can be
+    // read at a glance without looking at the number.
+    const float half_w = 0.60f * s;
+    const float plate = max(2.0f, 0.12f * s);
+    const float top = cy - 0.70f * s;
+    const float bottom = cy + 0.70f * s;
+    spr.fillRect(cx - half_w, top, 2 * half_w, plate, color);
+    spr.fillRect(cx - half_w, bottom - plate, 2 * half_w, plate, color);
+
+    uint8_t legs = 6 + 2 * (uint8_t)(value_unit * 3.99f);
+    float span = (bottom - plate) - (top + plate);
+    float step = span / legs;
+    float reach = half_w * 0.74f;
+    float x = cx - reach;
+    float y = top + plate;
+    for (uint8_t i = 0; i < legs; i++) {
+        float nx = (i % 2 == 0) ? cx + reach : cx - reach;
+        stroke(spr, x, y, nx, y + step, color);
+        x = nx;
+        y += step;
+    }
+}
+
+static void iconDroop(TFT_eSprite& spr, int16_t cx, int16_t cy, float s, uint16_t color, float value_unit) {
+    // A span that sags when the term is off and is drawn level as it comes up.
+    // Droop is the thing this setting removes, so the glyph shows it going out.
+    const float half_w = 0.76f * s;
+    const float line_y = cy - 0.26f * s;
+    const float sag = (1 - value_unit) * 0.62f * s;
+
+    // Where it should sit, dashed and dim: a sag is only legible against level.
+    for (int8_t i = -3; i < 3; i++) {
+        float x0 = cx + half_w * (i / 3.0f);
+        stroke(spr, x0, line_y, x0 + half_w * 0.20f, line_y, dim(color, 0.32f));
+    }
+
+    // The span itself, hanging between its two posts.
+    const uint8_t steps = 10;
+    float px = cx - half_w;
+    float py = line_y;
+    for (uint8_t i = 1; i <= steps; i++) {
+        float t = (float)i / steps;
+        float x = cx - half_w + 2 * half_w * t;
+        // Parabola through both posts, deepest in the middle.
+        float y = line_y + sag * 4 * t * (1 - t);
+        stroke(spr, px, py, x, y, color);
+        px = x;
+        py = y;
+    }
+
+    float post = max(1.5f, 0.11f * s);
+    spr.fillCircle(cx - half_w, line_y, post, color);
+    spr.fillCircle(cx + half_w, line_y, post, color);
+}
+
+static void iconDamping(TFT_eSprite& spr, int16_t cx, int16_t cy, float s, uint16_t color, float value_unit) {
+    // A ringing that dies away, and dies away sooner the higher the setting goes.
+    // At the bottom of the range it barely decays at all, which is exactly what
+    // too little damping feels like in the hand.
+    const float half_w = 0.82f * s;
+    const float amp = 0.54f * s;
+    const float decay = lerpf(0.5f, 4.5f, value_unit);
+
+    stroke(spr, cx - half_w, cy, cx + half_w, cy, dim(color, 0.30f));
+
+    const uint8_t steps = 24;
+    float px = cx - half_w;
+    float py = cy;
+    for (uint8_t i = 1; i <= steps; i++) {
+        float t = (float)i / steps;
+        float x = cx - half_w + 2 * half_w * t;
+        float y = cy - amp * expf(-decay * t) * sinf(t * 3 * PI);
+        stroke(spr, px, py, x, y, color);
+        px = x;
+        py = y;
+    }
+}
+
+static void iconTrace(TFT_eSprite& spr, int16_t cx, int16_t cy, float s, uint16_t color, float value_unit) {
+    // A scope window. The frame is there either way and only the signal comes and
+    // goes, so the row reads as one thing being switched on rather than as two
+    // different glyphs.
+    bool on = value_unit > 0.5f;
+    const float half_w = 0.84f * s;
+    const float half_h = 0.60f * s;
+    spr.drawRect(cx - half_w, cy - half_h, 2 * half_w, 2 * half_h, dim(color, on ? 0.60f : 0.30f));
+
+    if (!on) {
+        stroke(spr, cx - half_w * 0.78f, cy, cx + half_w * 0.78f, cy, dim(color, 0.35f));
+        return;
+    }
+
+    // Something with corners in it, so it reads as sampled data rather than as
+    // the smooth ring the damping glyph next door already owns.
+    const uint8_t points = 8;
+    const float xs[points] = {-0.78f, -0.46f, -0.30f, -0.05f, 0.14f, 0.38f, 0.56f, 0.78f};
+    const float ys[points] = {0.10f, 0.10f, -0.62f, 0.34f, -0.30f, 0.52f, -0.08f, -0.08f};
+    for (uint8_t i = 1; i < points; i++) {
+        stroke(spr,
+            cx + half_w * xs[i - 1], cy + half_h * ys[i - 1],
+            cx + half_w * xs[i], cy + half_h * ys[i],
+            color);
+    }
+    spr.fillCircle(cx + half_w * xs[2], cy + half_h * ys[2], max(1.5f, 0.10f * s), COLOR_SPECULAR);
+}
+
 static void iconPet(TFT_eSprite& spr, int16_t cx, int16_t cy, float s, uint16_t color, float value_unit) {
     // The page in miniature: the rim of the glass, and the pair of tall ovals
     // inside it. No ears, no head, no mouth - the mouth only exists on the page
@@ -292,6 +400,18 @@ void icon(TFT_eSprite& spr, AppIcon which, int16_t cx, int16_t cy, float size, u
             break;
         case AppIcon::PET:
             iconPet(spr, cx, cy, size, color, value_unit);
+            break;
+        case AppIcon::SPRING:
+            iconSpring(spr, cx, cy, size, color, value_unit);
+            break;
+        case AppIcon::DROOP:
+            iconDroop(spr, cx, cy, size, color, value_unit);
+            break;
+        case AppIcon::DAMPING:
+            iconDamping(spr, cx, cy, size, color, value_unit);
+            break;
+        case AppIcon::TRACE:
+            iconTrace(spr, cx, cy, size, color, value_unit);
             break;
     }
 }

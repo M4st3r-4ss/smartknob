@@ -48,6 +48,11 @@ InterfaceTask::InterfaceTask(const uint8_t task_core, MotorTask& motor_task, Dis
     knob_state_queue_ = xQueueCreate(1, sizeof(PB_SmartKnobState));
     assert(knob_state_queue_ != NULL);
 
+    // Depth 1 and overwritten, like the state queue: if this task falls behind,
+    // the tuning tool should miss samples rather than the motor loop stall.
+    telemetry_queue_ = xQueueCreate(1, sizeof(HapticTelemetry));
+    assert(telemetry_queue_ != NULL);
+
     mutex_ = xSemaphoreCreateMutex();
     assert(mutex_ != NULL);
 }
@@ -92,6 +97,10 @@ void InterfaceTask::run() {
     }
 
     motor_task_.addListener(knob_state_queue_);
+    motor_task_.addTelemetryListener(telemetry_queue_);
+    // The stored PID rows have to reach the motor before the first page is
+    // applied, or the knob spends its first moments on the schedule's defaults.
+    applyHapticSettings();
     openMenu();
 
     plaintext_protocol_.init([this] () {
@@ -185,6 +194,11 @@ void InterfaceTask::run() {
                 if (settings_.get(id) != before) {
                     publishSettingValues();
                     publishUiState();
+                    // The haptic rows are live: the point of tuning by feel is
+                    // that the knob changes under your hand as you turn it, so
+                    // they go to the motor now rather than on the confirming
+                    // press. applyHapticSettings() ignores unrelated rows.
+                    applyHapticSettings();
                 }
             }
         }
@@ -192,6 +206,7 @@ void InterfaceTask::run() {
         tickPattern();
         tickTimer();
         tickPet();
+        tickTelemetry();
         flushHostValue();
 
         current_protocol_->loop();
@@ -452,6 +467,41 @@ void InterfaceTask::publishSettingValues() {
     }
 }
 
+void InterfaceTask::applyHapticSettings() {
+    HapticGainScale scale = settings_.gainScale();
+    bool trace = settings_.traceEnabled();
+
+    // Both are sent only when they change. Every edit of any row comes through
+    // here, and each send is a queue message the motor task answers by dropping
+    // its integral - doing that on an unrelated row would be felt.
+    bool gains_changed = !haptic_settings_sent_
+            || scale.p != sent_gain_scale_.p
+            || scale.i != sent_gain_scale_.i
+            || scale.d != sent_gain_scale_.d;
+    if (gains_changed) {
+        motor_task_.setGainScale(scale);
+        sent_gain_scale_ = scale;
+    }
+    if (!haptic_settings_sent_ || trace != sent_trace_enabled_) {
+        motor_task_.setTraceEnabled(trace);
+        sent_trace_enabled_ = trace;
+    }
+    haptic_settings_sent_ = true;
+}
+
+void InterfaceTask::tickTelemetry() {
+    HapticTelemetry telemetry;
+    if (xQueueReceive(telemetry_queue_, &telemetry, 0) != pdTRUE) {
+        return;
+    }
+    // Only the plaintext protocol carries traces: the protobuf channel would need
+    // a new message type, and generating one means the nanopb submodule that
+    // building the firmware otherwise does without.
+    if (current_protocol_ == &plaintext_protocol_) {
+        plaintext_protocol_.sendTrace(telemetry);
+    }
+}
+
 void InterfaceTask::reapplyCurrentConfig() {
     switch (ui_state_.mode) {
         case UiMode::MENU:
@@ -478,6 +528,9 @@ void InterfaceTask::resetSettings() {
     publishSettingValues();
     ui_state_.settings_reset_nonce++;
     publishUiState();
+    // Puts the PID multipliers back to the schedule's own numbers, and stops any
+    // trace the reset just switched off.
+    applyHapticSettings();
 
     // Detent strength is folded into every locally-applied config, so the list
     // the reset returns to has to be re-sent to pick up the default feel.

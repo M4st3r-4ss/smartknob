@@ -21,6 +21,15 @@ static const uint32_t IDLE_CORRECTION_DELAY_MILLIS = 500;
 static const float IDLE_CORRECTION_MAX_ANGLE_RAD = 5 * PI / 180;
 static const float IDLE_CORRECTION_RATE_ALPHA = 0.0005;
 
+// Filter on the velocity SimpleFOC reports. This used to be a detail of the
+// sensor read that nothing much depended on; it is now the damping term's input
+// signal, so it is set explicitly rather than left at whichever default the
+// linked SimpleFOC version happens to ship. Raise it if damping sounds gritty,
+// lower it if damping feels like it arrives late.
+#ifndef FOC_LPF_VELOCITY
+#define FOC_LPF_VELOCITY 0.005
+#endif
+
 
 MotorTask::MotorTask(const uint8_t task_core, Configuration& configuration) : Task("Motor", 4000, 1, task_core), configuration_(configuration) {
     queue_ = xQueueCreate(5, sizeof(Command));
@@ -60,17 +69,14 @@ void MotorTask::run() {
     motor.velocity_limit = 10000;
     motor.linkSensor(&encoder);
 
-    // Not actually using the velocity loop built into SimpleFOC; but I'm using those PID variables
-    // to run PID for torque (and SimpleFOC studio supports updating them easily over serial for tuning)
-    motor.PID_velocity.P = FOC_PID_P;
-    motor.PID_velocity.I = FOC_PID_I;
-    motor.PID_velocity.D = FOC_PID_D;
-    motor.PID_velocity.output_ramp = FOC_PID_OUTPUT_RAMP;
-    motor.PID_velocity.limit = FOC_PID_LIMIT;
-
+    // The haptic torque loop runs on HapticPid (see haptic_pid.h), not on
+    // SimpleFOC's own PID objects. SimpleFOC is left doing what it is good at:
+    // commutation, and the sensor filtering below.
     #ifdef FOC_LPF
     motor.LPF_angle.Tf = FOC_LPF;
     #endif
+    // Damping reads this, so the filter on it is part of the haptic tuning.
+    motor.LPF_velocity.Tf = FOC_LPF_VELOCITY;
 
     motor.init();
 
@@ -170,26 +176,17 @@ void MotorTask::run() {
                     config = new_config;
                     log("Got new config");
 
-                    // Update derivative factor of torque controller based on detent width.
-                    // If the D factor is large on coarse detents, the motor ends up making noise because the P&D factors amplify the noise from the sensor.
-                    // This is a piecewise linear function so that fine detents (small width) get a higher D factor and coarse detents get a small D factor.
-                    // Fine detents need a nonzero D factor to artificially create "clicks" each time a new value is reached (the P factor is small
-                    // for fine detents due to the smaller angular errors, and the existing P factor doesn't work well for very small angle changes (easy to
-                    // get runaway due to sensor noise & lag)).
-                    // TODO: consider eliminating this D factor entirely and just "play" a hardcoded haptic "click" (e.g. a quick burst of torque in each
-                    // direction) whenever the position changes when the detent width is too small for the P factor to work well.
-                    const float derivative_lower_strength = config.detent_strength_unit * 0.08;
-                    const float derivative_upper_strength = config.detent_strength_unit * 0.02;
-                    const float derivative_position_width_lower = radians(3);
-                    const float derivative_position_width_upper = radians(8);
-                    const float raw = derivative_lower_strength + (derivative_upper_strength - derivative_lower_strength)/(derivative_position_width_upper - derivative_position_width_lower)*(config.position_width_radians - derivative_position_width_lower);
-                    // When there are intermittent detents (set via detent_positions), disable derivative factor as this adds extra "clicks" when nearing
-                    // a detent.
-                    motor.PID_velocity.D = config.detent_positions_count > 0 ? 0 : CLAMP(
-                        raw,
-                        min(derivative_lower_strength, derivative_upper_strength),
-                        max(derivative_lower_strength, derivative_upper_strength)
-                    );
+                    // Gains are no longer poked at from here: scheduleHaptics()
+                    // derives them from this config on every pass of the loop
+                    // below, which is also what lets the velocity taper work.
+                    //
+                    // The controller's history is dropped instead. A new config
+                    // usually moves the detent centre, and that step is our own
+                    // doing - carrying an integral or a slew-limited output across
+                    // it would show up as the knob shoving back at a page change.
+                    if (position_updated) {
+                        pid_.reset();
+                    }
                     break;
                 }
                 case CommandType::HAPTIC: {
@@ -212,13 +209,47 @@ void MotorTask::run() {
                     }
                     motor.move(0);
                     motor.loopFOC();
+                    // That drove the motor directly for ~6ms, so the controller's
+                    // idea of the last torque applied is now wrong, and its
+                    // timestep spans the whole click. Both are dropped rather than
+                    // slewed away from: the motor is at zero torque here, which is
+                    // exactly the state a fresh controller assumes.
+                    pid_.reset();
                     break;
                 }
+                case CommandType::GAIN_SCALE:
+                    gain_scale_ = command.data.gain_scale;
+                    snprintf(buf_, sizeof(buf_), "Gain scale: P=%.2f I=%.2f D=%.2f",
+                        gain_scale_.p, gain_scale_.i, gain_scale_.d);
+                    log(buf_);
+                    // The integral was earned under the old gains, so it does not
+                    // carry over to the new ones.
+                    pid_.reset();
+                    break;
+                case CommandType::TRACE:
+                    trace_enabled_ = command.data.trace_enabled;
+                    log(trace_enabled_ ? "Trace on" : "Trace off");
+                    break;
             }
         }
 
+        // Everything below works in the "position frame": the direction the
+        // position counts up, which on an inverted build is the opposite of the
+        // way the sensor counts. current_detent_center is already in this frame.
+        //
+        // Velocity is carried into it too, because the damping term is about to be
+        // subtracted from a torque expressed in it; getting that sign wrong turns
+        // damping into positive feedback.
+        #if SK_INVERT_ROTATION
+            const float position_sign = -1;
+        #else
+            const float position_sign = 1;
+        #endif
+        float shaft_angle_in_frame = position_sign * motor.shaft_angle;
+        float velocity_in_frame = position_sign * motor.shaft_velocity;
+
         // If we are not moving and we're close to the center (but not exactly there), slowly adjust the centerpoint to match the current position
-        idle_check_velocity_ewma = motor.shaft_velocity * IDLE_VELOCITY_EWMA_ALPHA + idle_check_velocity_ewma * (1 - IDLE_VELOCITY_EWMA_ALPHA);
+        idle_check_velocity_ewma = velocity_in_frame * IDLE_VELOCITY_EWMA_ALPHA + idle_check_velocity_ewma * (1 - IDLE_VELOCITY_EWMA_ALPHA);
         if (fabsf(idle_check_velocity_ewma) > IDLE_VELOCITY_RAD_PER_SEC) {
             last_idle_start = 0;
         } else {
@@ -226,15 +257,16 @@ void MotorTask::run() {
                 last_idle_start = millis();
             }
         }
-        if (last_idle_start > 0 && millis() - last_idle_start > IDLE_CORRECTION_DELAY_MILLIS && fabsf(motor.shaft_angle - current_detent_center) < IDLE_CORRECTION_MAX_ANGLE_RAD) {
-            current_detent_center = motor.shaft_angle * IDLE_CORRECTION_RATE_ALPHA + current_detent_center * (1 - IDLE_CORRECTION_RATE_ALPHA);
+        // Both sides in the position frame. This used to compare the raw sensor
+        // angle against a centre held in the position frame, so on an inverted
+        // build the two had opposite signs, the test all but never passed, and
+        // idle correction silently did nothing.
+        if (last_idle_start > 0 && millis() - last_idle_start > IDLE_CORRECTION_DELAY_MILLIS && fabsf(shaft_angle_in_frame - current_detent_center) < IDLE_CORRECTION_MAX_ANGLE_RAD) {
+            current_detent_center = shaft_angle_in_frame * IDLE_CORRECTION_RATE_ALPHA + current_detent_center * (1 - IDLE_CORRECTION_RATE_ALPHA);
         }
 
         // Check where we are relative to the current nearest detent; update our position if we've moved far enough to snap to another detent
-        float angle_to_detent_center = motor.shaft_angle - current_detent_center;
-        #if SK_INVERT_ROTATION
-            angle_to_detent_center = -motor.shaft_angle - current_detent_center;
-        #endif
+        float angle_to_detent_center = shaft_angle_in_frame - current_detent_center;
 
         float snap_point_radians = config.position_width_radians * config.snap_point;
         float bias_radians = config.position_width_radians * config.snap_point_bias;
@@ -242,14 +274,17 @@ void MotorTask::run() {
         float snap_point_radians_increase = -snap_point_radians + (current_position >= 0 ? -bias_radians : bias_radians); 
 
         int32_t num_positions = config.max_position - config.min_position + 1;
+        int32_t crossed = 0;
         if (angle_to_detent_center > snap_point_radians_decrease && (num_positions <= 0 || current_position > config.min_position)) {
             current_detent_center += config.position_width_radians;
             angle_to_detent_center -= config.position_width_radians;
             current_position--;
+            crossed = -1;
         } else if (angle_to_detent_center < snap_point_radians_increase && (num_positions <= 0 || current_position < config.max_position)) {
             current_detent_center -= config.position_width_radians;
             angle_to_detent_center += config.position_width_radians;
             current_position++;
+            crossed = 1;
         }
 
         latest_sub_position_unit = -angle_to_detent_center / config.position_width_radians;
@@ -260,33 +295,64 @@ void MotorTask::run() {
             fminf(config.position_width_radians*DEAD_ZONE_DETENT_PERCENT, DEAD_ZONE_RAD));
 
         bool out_of_bounds = num_positions > 0 && ((angle_to_detent_center > 0 && current_position == config.min_position) || (angle_to_detent_center < 0 && current_position == config.max_position));
-        motor.PID_velocity.limit = 10; //out_of_bounds ? 10 : 3;
-        motor.PID_velocity.P = out_of_bounds ? config.endstop_strength_unit * 4 : config.detent_strength_unit * 4;
 
-
-        // Apply motor torque based on our angle to the nearest detent (detent strength, etc is handled by the PID_velocity parameters)
-        if (fabsf(motor.shaft_velocity) > 60) {
-            // Don't apply torque if velocity is too high (helps avoid positive feedback loop/runaway)
-            motor.move(0);
-        } else {
-            float input = -angle_to_detent_center + dead_zone_adjustment;
-            if (!out_of_bounds && config.detent_positions_count > 0) {
-                bool in_detent = false;
-                for (uint8_t i = 0; i < config.detent_positions_count; i++) {
-                    if (config.detent_positions[i] == current_position) {
-                        in_detent = true;
-                        break;
-                    }
-                }
-                if (!in_detent) {
-                    input = 0;
+        // Intermittent detents: only the listed positions push back at all.
+        bool spring_active = true;
+        if (!out_of_bounds && config.detent_positions_count > 0) {
+            spring_active = false;
+            for (uint8_t i = 0; i < config.detent_positions_count; i++) {
+                if (config.detent_positions[i] == current_position) {
+                    spring_active = true;
+                    break;
                 }
             }
-            float torque = motor.PID_velocity(input);
-            #if SK_INVERT_ROTATION
-                torque = -torque;
-            #endif
-            motor.move(torque);
+        }
+
+        // Assigned field by field rather than brace-initialised: these structs
+        // carry default member initialisers, which stops them being aggregates
+        // under the gnu++11 the older ESP32 platform builds with.
+        HapticContext context;
+        context.config = config;
+        context.out_of_bounds = out_of_bounds;
+        context.spring_active = spring_active;
+        context.velocity = velocity_in_frame;
+
+        HapticSchedule schedule = scheduleHaptics(context, gain_scale_);
+        pid_.setGains(schedule.gains);
+        pid_.setIntegralBand(schedule.integral_band_radians);
+
+        // A detent was just crossed, so announce it. On anything but the finest
+        // detents the schedule asks for no impulse and the spring's own step is
+        // the click; see haptic_schedule.cpp.
+        if (crossed != 0 && schedule.click_torque > 0) {
+            pid_.kick(crossed * schedule.click_torque, schedule.click_duration_micros);
+        }
+
+        // The old hard cutout at 60 rad/s lives on as the top of the schedule's
+        // velocity taper, which reaches zero gain at the same speed. Nothing needs
+        // to special-case it here any more: past that point every term is zero, so
+        // the torque below is zero too, without a step change under the hand.
+        HapticInput input;
+        // P works on the dead-zoned error, I on the raw one (see haptic_pid.h).
+        input.error = -angle_to_detent_center + dead_zone_adjustment;
+        input.integral_error = -angle_to_detent_center;
+        input.velocity = velocity_in_frame;
+        input.now_micros = micros();
+
+        float torque = pid_.update(input);
+        motor.move(position_sign * torque);
+
+        if (trace_enabled_ && millis() - last_trace_ > TRACE_INTERVAL_MILLIS) {
+            HapticTelemetry telemetry;
+            telemetry.millis = millis();
+            telemetry.angle = shaft_angle_in_frame;
+            telemetry.detent_center = current_detent_center;
+            telemetry.position = current_position;
+            telemetry.sub_position_unit = latest_sub_position_unit;
+            telemetry.pid = pid_.trace();
+            telemetry.gains = schedule.gains;
+            publishTelemetry(telemetry);
+            last_trace_ = millis();
         }
 
         // Publish current status to other registered tasks periodically
@@ -338,14 +404,44 @@ void MotorTask::runCalibration() {
     xQueueSend(queue_, &command, portMAX_DELAY);
 }
 
+void MotorTask::setGainScale(const HapticGainScale& scale) {
+    Command command = {
+        .command_type = CommandType::GAIN_SCALE,
+        .data = {
+            .gain_scale = scale,
+        }
+    };
+    xQueueSend(queue_, &command, portMAX_DELAY);
+}
+
+void MotorTask::setTraceEnabled(bool enabled) {
+    Command command = {
+        .command_type = CommandType::TRACE,
+        .data = {
+            .trace_enabled = enabled,
+        }
+    };
+    xQueueSend(queue_, &command, portMAX_DELAY);
+}
+
 
 void MotorTask::addListener(QueueHandle_t queue) {
     listeners_.push_back(queue);
 }
 
+void MotorTask::addTelemetryListener(QueueHandle_t queue) {
+    telemetry_listeners_.push_back(queue);
+}
+
 void MotorTask::publish(const PB_SmartKnobState& state) {
     for (auto listener : listeners_) {
         xQueueOverwrite(listener, &state);
+    }
+}
+
+void MotorTask::publishTelemetry(const HapticTelemetry& telemetry) {
+    for (auto listener : telemetry_listeners_) {
+        xQueueOverwrite(listener, &telemetry);
     }
 }
 
@@ -524,6 +620,9 @@ void MotorTask::calibrate() {
     motor.zero_electric_angle = avg_offset_angle + _3PI_2;
     motor.voltage_limit = FOC_VOLTAGE_LIMIT;
     motor.controller = MotionControlType::torque;
+    // Calibration spent the last several seconds driving the motor open-loop, so
+    // the controller's history describes a machine that no longer exists.
+    pid_.reset();
 
     log("");
     log("RESULTS:");

@@ -2,19 +2,34 @@
 
 // Persisted under short keys so they fit NVS's 15-character limit comfortably.
 static const char* const NVS_NAMESPACE = "sk_ui";
-// Keys are looked up by name, so dropping a row leaves the remaining ones
-// pointing at the same entries they were saved under. The two action rows never
-// touch NVS; their slots are placeholders to keep this array the same length.
+// Keys are looked up by name, so adding or dropping a row leaves the remaining
+// ones pointing at the same entries they were saved under, wherever they have
+// moved to in the list.
+//
+// nullptr means the row is not persisted: the action rows, which have no value,
+// and the trace toggle, which is a debug stream that should not still be running
+// after a reboot nobody connected a tuning tool to.
 static const char* const NVS_KEYS[SETTING_COUNT] = {
-    "knob_str", "click_str", "min_bright", "led_ring", "led_bright", "unused", "unused2",
+    "knob_str", "click_str",
+    "pid_p", "pid_i", "pid_d",
+    "min_bright", "led_ring", "led_bright",
+    nullptr, nullptr, nullptr,
 };
 
 const SettingDescriptor SETTINGS[] = {
     {"STRENGTH", "Detent force", AppIcon::STRENGTH, SettingKind::PERCENT, 25, 200, 100, 3},
     {"CLICK", "Press feedback", AppIcon::CLICK, SettingKind::PERCENT, 25, 200, 100, 3},
+    // The three PID terms. Named for what they do to the feel rather than for
+    // which letter they are: "spring" is P, "droop" is what I removes, "damping"
+    // is D. 100% is the tuned schedule, so every one of them is a departure from
+    // a working default in a direction you can hear and feel.
+    {"SPRING", "Detent stiffness", AppIcon::SPRING, SettingKind::PERCENT, 25, 200, 100, 3},
+    {"DROOP", "Centring pull", AppIcon::DROOP, SettingKind::PERCENT, 0, 200, 0, 3},
+    {"DAMPING", "Settling", AppIcon::DAMPING, SettingKind::PERCENT, 0, 250, 100, 3},
     {"MIN BRIGHT", "Screen floor", AppIcon::BRIGHTNESS, SettingKind::PERCENT, 2, 100, 2, 3.6},
     {"LED RING", "Knob backlight", AppIcon::BULB, SettingKind::ONOFF, 0, 1, 1, 60},
     {"LED LEVEL", "Ring brightness", AppIcon::LED, SettingKind::PERCENT, 5, 100, 100, 3.6},
+    {"TRACE", "Stream haptics", AppIcon::TRACE, SettingKind::ONOFF, 0, 1, 0, 60},
     {"CALIBRATE", "Strain sensor", AppIcon::CALIBRATE, SettingKind::ACTION, 0, 0, 0, 20},
     {"RESET", "Restore defaults", AppIcon::RESET, SettingKind::ACTION, 0, 0, 0, 20},
 };
@@ -28,7 +43,7 @@ void SettingsStore::begin() {
     for (uint8_t i = 0; i < SETTING_COUNT; i++) {
         const SettingDescriptor& d = SETTINGS[i];
         int16_t value = d.default_value;
-        if (ready_ && d.kind != SettingKind::ACTION) {
+        if (ready_ && NVS_KEYS[i] != nullptr) {
             value = prefs_.getShort(NVS_KEYS[i], d.default_value);
         }
         values_[i] = constrain(value, d.min_value, d.max_value);
@@ -66,7 +81,7 @@ void SettingsStore::commit() {
         return;
     }
     for (uint8_t i = 0; i < SETTING_COUNT; i++) {
-        if (SETTINGS[i].kind == SettingKind::ACTION || values_[i] == saved_[i]) {
+        if (NVS_KEYS[i] == nullptr || values_[i] == saved_[i]) {
             continue;
         }
         prefs_.putShort(NVS_KEYS[i], values_[i]);
@@ -92,6 +107,18 @@ float SettingsStore::knobStrengthScale() const {
 
 float SettingsStore::clickForceScale() const {
     return get(SettingId::CLICK_FORCE) / 100.0f;
+}
+
+HapticGainScale SettingsStore::gainScale() const {
+    HapticGainScale scale;
+    scale.p = get(SettingId::DETENT_SPRING) / 100.0f;
+    scale.i = get(SettingId::DETENT_DROOP) / 100.0f;
+    scale.d = get(SettingId::DETENT_DAMPING) / 100.0f;
+    return scale;
+}
+
+bool SettingsStore::traceEnabled() const {
+    return isOn(SettingId::TRACE);
 }
 
 uint16_t SettingsStore::minBacklight() const {

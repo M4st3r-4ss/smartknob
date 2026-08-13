@@ -20,6 +20,11 @@ enum class AppIcon : uint8_t {
     CALIBRATE,
     RESET,
     PET,
+    /** The three haptic PID terms, and the telemetry stream. */
+    SPRING,
+    DROOP,
+    DAMPING,
+    TRACE,
 };
 
 /** How the app's position is presented on its page. */

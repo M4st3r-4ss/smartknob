@@ -3,20 +3,36 @@
 #include <Arduino.h>
 #include <Preferences.h>
 
+#include "../haptic_pid.h"
 #include "apps.h"
 
 /** Rows of the settings list, in the order they scroll past. */
 enum class SettingId : uint8_t {
     KNOB_STRENGTH,
     CLICK_FORCE,
+    /**
+     * Multipliers on the three haptic PID terms, as percentages of whatever the
+     * gain schedule picked for the page in question (see haptic_schedule.h). They
+     * sit next to the two feel rows above because that is what they are: the same
+     * kind of adjustment, one level further in.
+     *
+     * These are deliberately live and unguarded. The controller clamps its own
+     * output and fades every gain out at speed, so the worst a bad setting does is
+     * feel wrong - which is the point of being able to turn it back.
+     */
+    DETENT_SPRING,
+    DETENT_DROOP,
+    DETENT_DAMPING,
     MIN_BRIGHTNESS,
     LED_RING,
     LED_BRIGHTNESS,
+    /** Streams haptic telemetry over serial for the host-side tuning tool. */
+    TRACE,
     STRAIN_CALIBRATE,
     RESET,
 };
 
-constexpr uint8_t SETTING_COUNT = 7;
+constexpr uint8_t SETTING_COUNT = 11;
 
 enum class SettingKind : uint8_t {
     PERCENT,  // integer with a "%" suffix
@@ -75,6 +91,9 @@ class SettingsStore {
         float knobStrengthScale() const;
         /** Multiplier folded into played haptic clicks. */
         float clickForceScale() const;
+        /** The three PID multipliers, as the motor task wants them. */
+        HapticGainScale gainScale() const;
+        bool traceEnabled() const;
         /** Floor for the display backlight, in the 0-65535 backlight domain. */
         uint16_t minBacklight() const;
         /** LED ring brightness, 0-255, already zeroed when the ring is off. */
